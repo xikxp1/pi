@@ -4,7 +4,14 @@
   "defaultProvider": "claude-bridge",
   "defaultModel": "claude-opus-5",
   "defaultThinkingLevel": "high",
-  "packages": [],
+  "packages": [
+    "npm:pi-web-access",
+    "npm:@ff-labs/pi-fff",
+    "npm:pi-simplify",
+    "npm:pi-subagents",
+    "npm:@dietrichgebert/ponytail",
+    "npm:pi-btw"
+  ],
   "terminal": {
     "showTerminalProgress": true
   },
