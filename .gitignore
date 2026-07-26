@@ -1,0 +1,23 @@
+# Credentials — OAuth tokens / refresh tokens
+agent/auth.json
+.env
+.env.local
+*.pem
+*.key
+
+# Conversation history (contains project contents and prompts)
+agent/sessions/
+
+# Fetched provider catalog cache (etag/timestamps, regenerated on launch)
+agent/models-store.json
+
+# Vendored binaries
+agent/bin/
+
+# Dependencies
+node_modules/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.log

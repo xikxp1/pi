@@ -1,0 +1,206 @@
+/**
+ * Tests for MODELS construction + resolveModel.
+ * Pins: opus shortcut resolves to whichever opus is first in MODEL_IDS_IN_ORDER,
+ * projection strips pi-ai's baseUrl/api/provider/headers, and ordering is preserved.
+ */
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { MODEL_IDS_IN_ORDER, applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
+
+const PRO = { plan: "pro", longContextExtraUsage: false };
+const MAX = { plan: "max", longContextExtraUsage: false };
+const EXTRA = { plan: "pro", longContextExtraUsage: true };
+
+// Simulated pi-ai registry entry — extra fields mimic the ones pi-ai exposes
+// that must not leak into the provider-registered MODELS array.
+const mockPiAiModel = (id) => ({
+	id, name: id, reasoning: true, input: ["text"], cost: { input: 1, output: 1 },
+	contextWindow: 200000, maxTokens: 8000,
+	// Leaky fields that should be stripped by the projection:
+	baseUrl: "https://api.anthropic.com", api: "anthropic", provider: "anthropic",
+	headers: { "x-api-key": "LEAK" },
+});
+
+const oneM = (id) => ({ ...mockPiAiModel(id), contextWindow: 1000000 });
+
+const find = (models, id) => models.find((m) => m.id === id);
+
+describe("MODELS projection", () => {
+	it("strips baseUrl/api/provider/headers", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		for (const m of models) {
+			assert.equal(m.baseUrl, undefined);
+			assert.equal(m.api, undefined);
+			assert.equal(m.provider, undefined);
+			assert.equal(m.headers, undefined);
+		}
+	});
+
+	it("preserves MODEL_IDS_IN_ORDER ordering", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
+	});
+
+	it("supplies Opus 5 while pi-ai has not published its catalog entry", () => {
+		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
+		assert.deepEqual(find(models, "claude-opus-5"), {
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1000000,
+			maxTokens: 128000,
+			thinkingLevelMap: { xhigh: "xhigh" },
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+	});
+
+	it("prefers pi-ai metadata when Opus 5 becomes available there", () => {
+		const upstream = { ...mockPiAiModel("claude-opus-5"), name: "Upstream Opus 5", maxTokens: 64000 };
+		const models = buildModels([upstream]);
+		assert.equal(find(models, "claude-opus-5")?.name, "Upstream Opus 5");
+		assert.equal(find(models, "claude-opus-5")?.maxTokens, 64000);
+	});
+
+	it("zeros out cost regardless of pi-ai pricing", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		for (const m of models) {
+			assert.deepEqual(m.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		}
+	});
+
+	it("leaves display names bare before plan-specific context is applied", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
+		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
+		assert.ok(models.every((m) => !m.name.includes("1M")));
+	});
+
+	it("fills default thinkingLevelMap for sonnet-5 and sonnet-4-6 when pi-ai omits it", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "max" });
+		assert.deepEqual(find(models, "claude-sonnet-4-6")?.thinkingLevelMap, { xhigh: "max" });
+	});
+
+	it("preserves pi-ai's thinkingLevelMap when present", () => {
+		const withMap = (id) => ({ ...mockPiAiModel(id), thinkingLevelMap: { xhigh: "xhigh" } });
+		const models = buildModels([withMap("claude-sonnet-5")]);
+		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh" });
+	});
+
+	it("haiku gets no default thinkingLevelMap (no effort support)", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+		assert.equal(find(models, "claude-haiku-4-5")?.thinkingLevelMap, undefined);
+	});
+});
+
+describe("Claude Code runtime model policy", () => {
+	it("uses measured Pro defaults", () => {
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-5", PRO), { cliModelId: "claude-opus-5[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-8", PRO), { cliModelId: "claude-opus-4-8[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-7", PRO), { cliModelId: "claude-opus-4-7", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-6", PRO), { cliModelId: "claude-opus-4-6", contextWindow: 200000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-sonnet-4-6", PRO), { cliModelId: "claude-sonnet-4-6", contextWindow: 200000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-haiku-4-5", PRO), { cliModelId: "claude-haiku-4-5", contextWindow: 200000 });
+	});
+
+	it("plan max only changes Opus 4.6", () => {
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-8", MAX), { cliModelId: "claude-opus-4-8[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-7", MAX), { cliModelId: "claude-opus-4-7", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-6", MAX), { cliModelId: "claude-opus-4-6[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-sonnet-4-6", MAX), { cliModelId: "claude-sonnet-4-6", contextWindow: 200000 });
+	});
+
+	it("longContextExtraUsage enables metered variants but not Haiku", () => {
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-opus-4-6", EXTRA), { cliModelId: "claude-opus-4-6[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-sonnet-4-6", EXTRA), { cliModelId: "claude-sonnet-4-6[1m]", contextWindow: 1000000 });
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-haiku-4-5", EXTRA), { cliModelId: "claude-haiku-4-5", contextWindow: 200000 });
+	});
+
+	it("unknown model falls back to bare id at 200K", () => {
+		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-future-9-9", PRO), { cliModelId: "claude-future-9-9", contextWindow: 200000 });
+	});
+});
+
+describe("claudeCodeModelId", () => {
+	const models = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
+
+	it("returns the measured SDK request id", () => {
+		assert.equal(claudeCodeModelId(find(models, "claude-opus-5"), PRO), "claude-opus-5[1m]");
+		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-8"), PRO), "claude-opus-4-8[1m]");
+		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-7"), PRO), "claude-opus-4-7");
+		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-6"), PRO), "claude-opus-4-6");
+		assert.equal(claudeCodeModelId(find(models, "claude-opus-4-6"), MAX), "claude-opus-4-6[1m]");
+		assert.equal(claudeCodeModelId(find(models, "claude-sonnet-4-6"), EXTRA), "claude-sonnet-4-6[1m]");
+		assert.equal(claudeCodeModelId(find(models, "claude-haiku-4-5"), EXTRA), "claude-haiku-4-5");
+	});
+
+});
+
+describe("applyLongContext", () => {
+	const models = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
+
+	it("registers measured Pro defaults", () => {
+		const registered = applyLongContext(models, PRO);
+		assert.equal(find(registered, "claude-opus-5").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-opus-4-8").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-opus-4-7").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-opus-4-6").contextWindow, 200000);
+		assert.equal(find(registered, "claude-sonnet-4-6").contextWindow, 200000);
+		assert.equal(find(registered, "claude-haiku-4-5").contextWindow, 200000);
+		// Does not mutate the source table used for id resolution.
+		assert.equal(find(models, "claude-opus-4-6").contextWindow, 1000000);
+	});
+
+	it("registers Max-plan Opus 4.6 at 1M but leaves Sonnet at 200K", () => {
+		const registered = applyLongContext(models, MAX);
+		assert.equal(find(registered, "claude-opus-4-6").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-sonnet-4-6").contextWindow, 200000);
+	});
+
+	it("registers extra-usage Opus 4.6 and Sonnet at 1M", () => {
+		const registered = applyLongContext(models, EXTRA);
+		assert.equal(find(registered, "claude-opus-4-6").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-sonnet-4-6").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-haiku-4-5").contextWindow, 200000);
+	});
+
+	it("labels exactly the registered 1M models", () => {
+		const pro = applyLongContext(models, PRO);
+		assert.equal(find(pro, "claude-opus-5").name, "claude-opus-5 1M");
+		assert.equal(find(pro, "claude-opus-4-8").name, "claude-opus-4-8 1M");
+		assert.equal(find(pro, "claude-opus-4-7").name, "claude-opus-4-7 1M");
+		assert.equal(find(pro, "claude-opus-4-6").name, "claude-opus-4-6");
+		assert.equal(find(pro, "claude-sonnet-4-6").name, "claude-sonnet-4-6");
+
+		const extra = applyLongContext(models, EXTRA);
+		assert.equal(find(extra, "claude-opus-4-6").name, "claude-opus-4-6 1M");
+		assert.equal(find(extra, "claude-sonnet-4-6").name, "claude-sonnet-4-6 1M");
+	});
+});
+
+describe("resolveModel", () => {
+	const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
+
+	it("opus shortcut resolves to claude-opus-5 (first opus in order)", () => {
+		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
+	});
+
+	it("haiku shortcut resolves to claude-haiku-4-5", () => {
+		assert.equal(resolveModel(models, "haiku")?.id, "claude-haiku-4-5");
+	});
+
+	it("full ID resolves to itself", () => {
+		assert.equal(resolveModel(models, "claude-opus-4-6")?.id, "claude-opus-4-6");
+	});
+
+	it("returns undefined when no match", () => {
+		assert.equal(resolveModel(models, "gpt-9"), undefined);
+	});
+
+	it("returns the matched model object for CLI-arg conversion", () => {
+		const oneMModels = buildModels(MODEL_IDS_IN_ORDER.map(oneM));
+		const model = resolveModel(oneMModels, "opus");
+		assert.equal(model.id, "claude-opus-5");
+		assert.equal(claudeCodeModelId(model, PRO), "claude-opus-5[1m]");
+	});
+});

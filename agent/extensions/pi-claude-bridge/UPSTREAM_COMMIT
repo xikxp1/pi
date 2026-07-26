@@ -1,0 +1,14 @@
+c699bb9 feat(models): add Claude Opus 5 (PR #40)
+
+Local modifications on top of upstream:
+- src/index.ts: show subscription usage in pi's footer via ctx.ui.setStatus()
+  ("claude 5h 22% ↻3h51m · 7d 2% ↻2d3h"). Upstream only fires a transient
+  notify() on warning/rejected, so usage was invisible otherwise. Percentages
+  come from the OAuth usage endpoint (api.anthropic.com/api/oauth/usage, the
+  same source as Claude Code's /usage) because the SDK's rate_limit_event
+  carries resetsAt but almost never utilization, and never the weekly window.
+  Polled at most every 5 minutes; token is read from ~/.claude/.credentials.json
+  or the macOS keychain.
+- src/index.ts: handle rate_limit_event before consumeQuery's currentPiStream
+  guard. Claude Code emits it after message_stop, when the pi stream is already
+  closed, so upstream's switch-case never ran on tool-using turns.

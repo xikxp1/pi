@@ -1,0 +1,13 @@
+{
+  "lastChangelogVersion": "0.82.1",
+  "theme": "monokai",
+  "defaultProvider": "claude-bridge",
+  "defaultModel": "claude-opus-5",
+  "defaultThinkingLevel": "high",
+  "packages": [],
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "enableInstallTelemetry": false,
+  "defaultProjectTrust": "ask"
+}
