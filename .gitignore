@@ -11,6 +11,13 @@ agent/sessions/
 # Fetched provider catalog cache (etag/timestamps, regenerated on launch)
 agent/models-store.json
 
+# Local runtime data, caches, and settings backups
+agent/fff/
+agent/run-history.jsonl
+agent/backups/
+pi-acp/session-map.json
+web-search-cache/
+
 # Vendored binaries
 agent/bin/
 
