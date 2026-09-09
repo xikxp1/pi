@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "sessions": {
+    "01a082aa-fafc-7613-a757-fcb2200a32bf": {
+      "sessionId": "01a082aa-fafc-7613-a757-fcb2200a32bf",
+      "cwd": "/Users/xikxp1/Projects/pigui-agent",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pigui-agent--/2026-09-08T20-17-18-588Z_01a082aa-fafc-7613-a757-fcb2200a32bf.jsonl",
+      "updatedAt": "2026-09-08T20:17:19.245Z"
+    },
+    "01a085ea-11df-761a-82fb-deab06b678d2": {
+      "sessionId": "01a085ea-11df-761a-82fb-deab06b678d2",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T11-25-04-863Z_01a085ea-11df-761a-82fb-deab06b678d2.jsonl",
+      "updatedAt": "2026-09-09T11:25:05.326Z"
+    },
+    "01a085f5-933f-76c6-aaa9-d4b0e6103106": {
+      "sessionId": "01a085f5-933f-76c6-aaa9-d4b0e6103106",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T11-37-38-879Z_01a085f5-933f-76c6-aaa9-d4b0e6103106.jsonl",
+      "updatedAt": "2026-09-09T11:37:39.276Z"
+    },
+    "01a0860a-832a-7617-be16-36e129178828": {
+      "sessionId": "01a0860a-832a-7617-be16-36e129178828",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T12-00-31-018Z_01a0860a-832a-7617-be16-36e129178828.jsonl",
+      "updatedAt": "2026-09-09T12:00:32.247Z"
+    },
+    "sess-1": {
+      "sessionId": "sess-1",
+      "cwd": "/tmp/project",
+      "sessionFile": "/var/folders/h7/x5_nq3390v9654vm_fm53wd40000gn/T/pi-acp-test-ulDWaG/sessions/--tmp--project--/0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl",
+      "updatedAt": "2026-09-09T17:10:26.797Z"
+    },
+    "01a08615-451d-701f-8364-001dadf6fa17": {
+      "sessionId": "01a08615-451d-701f-8364-001dadf6fa17",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T12-12-16-030Z_01a08615-451d-701f-8364-001dadf6fa17.jsonl",
+      "updatedAt": "2026-09-09T12:12:16.712Z"
+    },
+    "01a0861a-dd76-76d4-8424-46e488489e37": {
+      "sessionId": "01a0861a-dd76-76d4-8424-46e488489e37",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T12-18-22-710Z_01a0861a-dd76-76d4-8424-46e488489e37.jsonl",
+      "updatedAt": "2026-09-09T12:18:23.389Z"
+    },
+    "01a08637-4a77-7345-bdf3-1de34ca7f785": {
+      "sessionId": "01a08637-4a77-7345-bdf3-1de34ca7f785",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T12-49-25-623Z_01a08637-4a77-7345-bdf3-1de34ca7f785.jsonl",
+      "updatedAt": "2026-09-09T12:49:26.409Z"
+    },
+    "01a0864b-46b3-70e0-b904-5775a7f63878": {
+      "sessionId": "01a0864b-46b3-70e0-b904-5775a7f63878",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-11-15-380Z_01a0864b-46b3-70e0-b904-5775a7f63878.jsonl",
+      "updatedAt": "2026-09-09T13:19:11.998Z"
+    },
+    "01a08652-9759-74bc-b5cd-37c617923f3f": {
+      "sessionId": "01a08652-9759-74bc-b5cd-37c617923f3f",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-19-14-777Z_01a08652-9759-74bc-b5cd-37c617923f3f.jsonl",
+      "updatedAt": "2026-09-09T13:19:15.426Z"
+    },
+    "01a08653-3770-71ee-b55b-53ebe43eb403": {
+      "sessionId": "01a08653-3770-71ee-b55b-53ebe43eb403",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-19-55-761Z_01a08653-3770-71ee-b55b-53ebe43eb403.jsonl",
+      "updatedAt": "2026-09-09T13:54:52.316Z"
+    },
+    "01a08653-d441-73a8-a893-8c6e5ea1ad53": {
+      "sessionId": "01a08653-d441-73a8-a893-8c6e5ea1ad53",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-20-35-905Z_01a08653-d441-73a8-a893-8c6e5ea1ad53.jsonl",
+      "updatedAt": "2026-09-09T13:55:24.228Z"
+    },
+    "01a0866f-29a4-7116-b0bd-2c28da2b7464": {
+      "sessionId": "01a0866f-29a4-7116-b0bd-2c28da2b7464",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-50-27-237Z_01a0866f-29a4-7116-b0bd-2c28da2b7464.jsonl",
+      "updatedAt": "2026-09-09T15:21:36.569Z"
+    },
+    "01a08671-53e6-7426-b0e0-6583baa8cf7a": {
+      "sessionId": "01a08671-53e6-7426-b0e0-6583baa8cf7a",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-52-49-127Z_01a08671-53e6-7426-b0e0-6583baa8cf7a.jsonl",
+      "updatedAt": "2026-09-09T13:53:12.065Z"
+    },
+    "01a08671-e7f4-700d-b824-5ebc3caf47a7": {
+      "sessionId": "01a08671-e7f4-700d-b824-5ebc3caf47a7",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-53-27-029Z_01a08671-e7f4-700d-b824-5ebc3caf47a7.jsonl",
+      "updatedAt": "2026-09-09T13:55:02.789Z"
+    },
+    "01a08673-e26b-7686-950e-b92a94bbc61a": {
+      "sessionId": "01a08673-e26b-7686-950e-b92a94bbc61a",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-55-36-684Z_01a08673-e26b-7686-950e-b92a94bbc61a.jsonl",
+      "updatedAt": "2026-09-09T13:55:37.244Z"
+    },
+    "01a08675-fe1c-773c-9ed8-ec3995151943": {
+      "sessionId": "01a08675-fe1c-773c-9ed8-ec3995151943",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-57-54-844Z_01a08675-fe1c-773c-9ed8-ec3995151943.jsonl",
+      "updatedAt": "2026-09-09T13:58:24.191Z"
+    },
+    "01a08676-7aa7-7305-b6da-4c4356ea5ed6": {
+      "sessionId": "01a08676-7aa7-7305-b6da-4c4356ea5ed6",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T13-58-26-728Z_01a08676-7aa7-7305-b6da-4c4356ea5ed6.jsonl",
+      "updatedAt": "2026-09-09T14:47:41.578Z"
+    },
+    "01a08684-28e2-74bb-84bc-18bb75e34342": {
+      "sessionId": "01a08684-28e2-74bb-84bc-18bb75e34342",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-13-23-298Z_01a08684-28e2-74bb-84bc-18bb75e34342.jsonl",
+      "updatedAt": "2026-09-09T14:47:19.425Z"
+    },
+    "01a08685-b648-70dc-9dba-e47af58f3745": {
+      "sessionId": "01a08685-b648-70dc-9dba-e47af58f3745",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-15-05-032Z_01a08685-b648-70dc-9dba-e47af58f3745.jsonl",
+      "updatedAt": "2026-09-09T15:03:23.896Z"
+    },
+    "01a08687-a7a3-736c-a6bd-0bd1f3b84fcc": {
+      "sessionId": "01a08687-a7a3-736c-a6bd-0bd1f3b84fcc",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-17-12-356Z_01a08687-a7a3-736c-a6bd-0bd1f3b84fcc.jsonl",
+      "updatedAt": "2026-09-09T14:17:13.006Z"
+    },
+    "01a08688-68e2-749d-b844-f098b2ec7329": {
+      "sessionId": "01a08688-68e2-749d-b844-f098b2ec7329",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-18-01-826Z_01a08688-68e2-749d-b844-f098b2ec7329.jsonl",
+      "updatedAt": "2026-09-09T14:18:02.421Z"
+    },
+    "01a08688-fe75-76b5-ab19-5a028ad4bf9e": {
+      "sessionId": "01a08688-fe75-76b5-ab19-5a028ad4bf9e",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-18-40-118Z_01a08688-fe75-76b5-ab19-5a028ad4bf9e.jsonl",
+      "updatedAt": "2026-09-09T14:27:51.700Z"
+    },
+    "01a0868c-b868-7117-b91a-c15eba0c5956": {
+      "sessionId": "01a0868c-b868-7117-b91a-c15eba0c5956",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-22-44-328Z_01a0868c-b868-7117-b91a-c15eba0c5956.jsonl",
+      "updatedAt": "2026-09-09T14:27:50.512Z"
+    },
+    "01a0868d-3e70-7192-805d-10f85b813790": {
+      "sessionId": "01a0868d-3e70-7192-805d-10f85b813790",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T14-23-18-640Z_01a0868d-3e70-7192-805d-10f85b813790.jsonl",
+      "updatedAt": "2026-09-09T15:04:54.888Z"
+    },
+    "01a086b3-56c3-72f1-b051-b7a27417d965": {
+      "sessionId": "01a086b3-56c3-72f1-b051-b7a27417d965",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T15-04-55-235Z_01a086b3-56c3-72f1-b051-b7a27417d965.jsonl",
+      "updatedAt": "2026-09-09T15:04:56.016Z"
+    },
+    "01a086b8-e217-7349-ac93-df3d7baf5984": {
+      "sessionId": "01a086b8-e217-7349-ac93-df3d7baf5984",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T15-10-58-584Z_01a086b8-e217-7349-ac93-df3d7baf5984.jsonl",
+      "updatedAt": "2026-09-09T15:21:50.508Z"
+    },
+    "01a086b9-fee1-72d7-9a6b-ce2309ac778a": {
+      "sessionId": "01a086b9-fee1-72d7-9a6b-ce2309ac778a",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T15-12-11-490Z_01a086b9-fee1-72d7-9a6b-ce2309ac778a.jsonl",
+      "updatedAt": "2026-09-09T15:12:12.149Z"
+    },
+    "01a086c7-cc38-7546-8cee-59d79426de92": {
+      "sessionId": "01a086c7-cc38-7546-8cee-59d79426de92",
+      "cwd": "/Users/xikxp1/.pi",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-.pi--/2026-09-09T15-27-16-024Z_01a086c7-cc38-7546-8cee-59d79426de92.jsonl",
+      "updatedAt": "2026-09-09T17:02:05.663Z"
+    },
+    "01a086d2-deb3-7430-bc2e-7311ae90150e": {
+      "sessionId": "01a086d2-deb3-7430-bc2e-7311ae90150e",
+      "cwd": "/Users/xikxp1/.pi",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-.pi--/2026-09-09T15-39-21-651Z_01a086d2-deb3-7430-bc2e-7311ae90150e.jsonl",
+      "updatedAt": "2026-09-09T15:39:22.359Z"
+    },
+    "01a086e9-68e2-75a9-9e20-5e575ccad946": {
+      "sessionId": "01a086e9-68e2-75a9-9e20-5e575ccad946",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T16-03-58-818Z_01a086e9-68e2-75a9-9e20-5e575ccad946.jsonl",
+      "updatedAt": "2026-09-09T16:21:07.498Z"
+    },
+    "other": {
+      "sessionId": "other",
+      "cwd": "/var/folders/h7/x5_nq3390v9654vm_fm53wd40000gn/T/pi-acp-retention-yQcXhC",
+      "sessionFile": "/var/folders/h7/x5_nq3390v9654vm_fm53wd40000gn/T/pi-acp-retention-Gg8BjP/sessions/--test--/0000_other.jsonl",
+      "updatedAt": "2026-09-09T17:10:31.683Z"
+    },
+    "01a086fc-94bf-7740-b158-3256612b268b": {
+      "sessionId": "01a086fc-94bf-7740-b158-3256612b268b",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T16-24-55-232Z_01a086fc-94bf-7740-b158-3256612b268b.jsonl",
+      "updatedAt": "2026-09-09T16:54:39.663Z"
+    },
+    "01a08717-db9b-714b-85ea-775d806b9739": {
+      "sessionId": "01a08717-db9b-714b-85ea-775d806b9739",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T16-54-42-844Z_01a08717-db9b-714b-85ea-775d806b9739.jsonl",
+      "updatedAt": "2026-09-09T17:02:05.545Z"
+    },
+    "01a0871e-f6a6-73a4-8e4e-d923b4d50bd1": {
+      "sessionId": "01a0871e-f6a6-73a4-8e4e-d923b4d50bd1",
+      "cwd": "/Users/xikxp1/Projects/pi-acp",
+      "sessionFile": "/Users/xikxp1/.pi/agent/sessions/--Users-xikxp1-Projects-pi-acp--/2026-09-09T17-02-28-519Z_01a0871e-f6a6-73a4-8e4e-d923b4d50bd1.jsonl",
+      "updatedAt": "2026-09-09T17:02:29.103Z"
+    }
+  }
+}

@@ -7,7 +7,7 @@
   "packages": [
     "npm:@ff-labs/pi-fff",
     "npm:pi-ask-user",
-    "./packages/pi-claude-native",
+    "npm:pi-claude-bridge",
     "npm:pi-web-access",
     "npm:@tintinweb/pi-subagents"
   ],

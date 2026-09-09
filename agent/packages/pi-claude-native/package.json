@@ -1,0 +1,20 @@
+{
+  "name": "pi-claude-native",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateless Claude Code transport with Pi-owned agent execution",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:live": "PI_CLAUDE_LIVE=1 node --test test/live.test.mjs test/pi-live.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
