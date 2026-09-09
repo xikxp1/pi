@@ -127,8 +127,11 @@ Pi thinking levels map to CLI effort; `xhigh` and `max` remain distinct.
   tools use their ordinary JSON schema fallback. `toolChoice: none` is honored.
 - Claude controls actual thinking visibility and prompt-cache policy. Pi cache
   retention settings are not translated into undocumented CLI internals.
-- Token usage comes from the actual streamed response. Cost is zero in Pi for
-  this subscription transport; it is **not** a statement about account overages.
+- Token usage comes from the actual streamed response. Pi reports **estimated
+  API-equivalent costs** using Anthropic catalog prices, including cache reads
+  and writes. These are **not** Claude Max subscription charges or account
+  overages. `modelOverrides` can override `cost` rates (USD per million tokens).
+  Previously recorded zero-cost messages are not recalculated.
 - No prompt/transcript debug logging. Request temp files are removed on normal
   completion/error/abort; an uncatchable host crash can leave private temp files.
   Claude may retain its own operational metadata despite disabled persistence.

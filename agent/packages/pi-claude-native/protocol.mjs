@@ -251,8 +251,9 @@ export function emptyMessage(model) {
 
 /** Strict adapter for one complete Anthropic response; no second agent loop. */
 export class ResponseDecoder {
-  constructor(output, tools, emit) {
+  constructor(output, tools, emit, model = {}) {
     this.output = output;
+    this.rates = model.cost ?? {};
     this.emit = emit;
     this.blocks = new Map();
     this.tools = new Map(tools.map((t) => [wireName(t.name), t.name]));
@@ -271,6 +272,15 @@ export class ResponseDecoder {
     }
     usage.totalTokens =
       usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    // Catalog prices are USD per million tokens. Recompute from cumulative
+    // counts, never add costs again when a later frame repeats usage.
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"])
+      usage.cost[key] = (usage[key] * (this.rates[key] ?? 0)) / 1_000_000;
+    usage.cost.total =
+      usage.cost.input +
+      usage.cost.output +
+      usage.cost.cacheRead +
+      usage.cost.cacheWrite;
   }
   event(e) {
     if (this.done) return;

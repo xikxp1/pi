@@ -231,7 +231,7 @@ export async function runRequest(
       ),
     ]);
     abort.signal.throwIfAborted();
-    const decoder = new ResponseDecoder(output, payload.tools, emit);
+    const decoder = new ResponseDecoder(output, payload.tools, emit, model);
     const args = commandArgs({
       model,
       options,
