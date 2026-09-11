@@ -36,20 +36,22 @@ Profiles are saved in `$PI_CODING_AGENT_DIR/goal.json` (normally `~/.pi/agent/go
 
 5. Isolated implementers execute sequentially. Unfinished work returns `continue`, carrying retained edits and its previous report into the next worker without another approval. The coordinator runs exactly the approved commands at their checkpoints. Failed repeatable checks and review findings receive bounded in-scope repairs. An independent reviewer must return a passing assessment with evidence for every acceptance criterion before the goal completes.
 
-### Bounded continuation and command checkpoints
+### Progress-based continuation and command checkpoints
 
 New proposals include an explicit, approval-token-bound execution policy:
 
-- Up to **4 worker attempts per step or repair**, **2 repair rounds**, and **2 consecutive no-file-progress continuation attempts** before pausing. These limits reset only when the user explicitly requests `/goal resume`.
+- **No total worker-attempt cap per step or repair** in new version-2 policies. Productive unfinished work continues automatically, without repeated `/goal resume` requests. Each worker still has its configured turn limit; a fresh worker receives retained edits and the previous report.
+- Progress is measured by changes in approved file snapshots, not worker claims. **2 consecutive no-file-progress continuation attempts** pause execution; an observed file change resets this stall counter. Identical rewrites do not count. File changes do not prove useful progress or correctness: a worker that keeps changing files can keep consuming tokens until completion, a blocker, or cancellation. Use `/goal pause` to stop it.
+- **2 repair rounds** remain the limit. A productive repair may take more than four worker attempts within its round. Stall and repair-round counters reset only when the user explicitly requests `/goal resume`.
 - `completed` means the delegated code-writing step is finished. `continue` means work remains without an external blocker. `blocked` means a concrete external prerequisite, new decision, or operation beyond approved scope is needed. Workers must not call themselves blocked just because tests are delegated to the coordinator.
 - Every check can specify `afterStep: 0` to run before any worker, or `afterStep: N` to run immediately after step N. Omission means after the final step. Checkpoints execute in ascending step order, preserving command order within each checkpoint.
 - `repeatable: true` explicitly authorizes automatic reruns. Build/test commands usually belong here. Setup, installation, deployment, and other potentially non-idempotent commands should normally use `false` (the default). Exact commands, checkpoints and repeat permissions appear in the proposal.
 - Repairs may edit only files belonging to reached steps and may not change the approved plan, acceptance criteria, commands or profiles. They receive actual failed-check/review evidence. Completed workers and successful one-shot commands are not replayed; previously passed repeatable checks are rerun after repairs.
 - Failed one-shot commands stop without automatic repair or rerun. `/goal resume` explicitly retries the failed command; inspect its output and partial side effects first.
-- Retry limits, concrete blockers, and settled workers/reviewers missing usable output pause at an inspected checkpoint while retaining approval. `/goal resume` continues unchanged authorized work, without another interview, plan or approval. File drift prevents this continuation.
+- Consecutive stalls, repair-round limits, concrete blockers, and settled workers/reviewers missing usable output pause at an inspected checkpoint while retaining approval. Pauses include recorded worker progress and an evidence link; status and the widget label unfinished steps as paused rather than implying a worker is running. `/goal resume` continues unchanged authorized work, without another interview, plan or approval. File drift prevents this continuation.
 - Cancellation, uncertain worker settlement, session restoration, scope/profile changes and external changes still require inspection and fresh approval. Existing edits and evidence are preserved. No automatic commits, merges, arbitrary shell commands or scope expansion occur.
 
-**Existing plans are not silently upgraded.** Plans without the new execution policy retain the old stop-on-failure behavior. After reloading, use `/goal revise` once to retain the implementation scope/edits and propose checkpointed execution, then approve that new policy explicitly. Read-only research/planning incur model usage before implementation approval.
+**Existing plans are not silently upgraded.** Version-1 policies retain their approved four-attempt cap, and plans without an execution policy retain the original stop-on-failure behavior. Reload the extension only after owned work has settled. Then use `/goal revise Keep the implementation scope and retained edits; use progress-based continuation` once and approve the new proposal explicitly. Merely resuming or reapproving an old plan does not change its policy. Read-only research/planning incur model usage before implementation approval.
 
 ## Commands
 
@@ -114,7 +116,7 @@ PI_GOAL_TEST_ACP=/absolute/path/to/pi-acp/dist/index.js npm test
 
 Coverage includes state/profile/path validation, stale approval, branch restoration, parent tool gates, callback races, cancellation, model/thinking and child tool isolation, verification/review failure, real Pi RPC, and optional real pi-acp transport with an ACP client that has no elicitation capability. The ACP test covers both saved profiles and first-use selection, chat answers, explicit-token/confirmation approval, and native child cards.
 
-Live Zed and interactive TUI rendering still require a manual smoke test: start a disposable goal, configure roles, answer a question, reject/revise a plan, approve it, observe partial-step continuation and repair, resume a limit-paused checkpoint without reapproval, then interrupt/reload and confirm fresh approval is required.
+Live Zed and interactive TUI rendering still require a manual smoke test: start a disposable goal, configure roles, answer a question, reject/revise a plan, approve it, observe productive continuation beyond four attempts and repair, resume a stall-paused checkpoint without reapproval, then interrupt/reload and confirm fresh approval is required.
 
 ## Design references
 

@@ -1,4 +1,9 @@
-import { approvalToken, hash } from "./core.mjs";
+import {
+  approvalToken,
+  hash,
+  renderExecutionProgress,
+  validateExecutionPolicy,
+} from "./core.mjs";
 import { changedFiles } from "./storage.mjs";
 
 /** A settled, inspected checkpoint. Only the user command may resume it. */
@@ -38,7 +43,7 @@ export async function runBoundedExecution({
   checkApproval,
   notify,
 }) {
-  const policy = goal.plan.execution;
+  const policy = validateExecutionPolicy(goal.plan.execution);
   const token = approvalToken(goal);
   checkApproval();
   const initial = await snapshot();
@@ -85,7 +90,7 @@ export async function runBoundedExecution({
   const pause = (message) => {
     save();
     throw new ContinuationPause(
-      `${message}\nApproval retained for the unchanged scope. Use /goal resume to continue, or /goal revise for scope changes.`,
+      `${message}\n${renderExecutionProgress(goal)}\nApproval retained for the unchanged scope. Use /goal resume to continue, or /goal revise for scope changes.`,
     );
   };
   const evidence = () =>
@@ -97,7 +102,10 @@ export async function runBoundedExecution({
 
   async function runWork(step, key, feedback, progress) {
     const before = await assertFresh();
-    if ((journal.attempts[key] ?? 0) >= policy.maxStepAttempts)
+    if (
+      policy.maxStepAttempts !== null &&
+      (journal.attempts[key] ?? 0) >= policy.maxStepAttempts
+    )
       pause(
         `Worker attempt limit (${policy.maxStepAttempts}) reached for ${step.title}.`,
       );
@@ -105,7 +113,7 @@ export async function runBoundedExecution({
     if (progress) progress.status = "in_progress";
     save();
     announce(
-      `Implementing ${step.title}, attempt ${journal.attempts[key]}/${policy.maxStepAttempts}.`,
+      `Implementing ${step.title}, attempt ${journal.attempts[key]}${policy.maxStepAttempts === null ? " (progress-based continuation)" : `/${policy.maxStepAttempts}`}.`,
     );
     let report;
     try {
@@ -131,6 +139,7 @@ export async function runBoundedExecution({
         step: step.id,
         error: error.message,
         artifact: error.artifact,
+        observedChangedFiles: changedFiles(before, after),
       });
       pause(`Worker stopped without a usable result: ${error.message}`);
     }
@@ -166,7 +175,7 @@ export async function runBoundedExecution({
         `No file progress in ${journal.noProgress[key]} consecutive attempts: ${report.summary}`,
       );
     announce(
-      `Continuing unfinished work without another approval: ${report.summary}`,
+      `Continuing unfinished work without another approval. Observed file changes: ${changed.join(", ") || "none"}. Consecutive no-file-progress attempts: ${journal.noProgress[key]}/${policy.maxNoProgressAttempts}. Worker report: ${report.summary}`,
     );
     return false;
   }

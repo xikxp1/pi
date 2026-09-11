@@ -26,6 +26,7 @@ import {
   renderProfiles,
   renderPlan,
   renderStatus,
+  renderStepProgress,
   validatePlan,
   PLAN_SCHEMA,
   REVIEW_SCHEMA,
@@ -42,7 +43,7 @@ import {
   saveArtifact,
 } from "./storage.mjs";
 
-const HELP = `Goal workflow\n\n/goal <feature> - start a deliberate feature interview\n/goal configure [role] - pick missing profile settings (or reconfigure one role)\n/goal profile <role> <provider/model> <thinking> [maxTurns] - save a default\n/goal override <role> <provider/model> <thinking> [maxTurns] - change this goal and invalidate approval\n/goal answer <text> - answer the pending question (ordinary chat also works)\n/goal approve <revision> - approve the displayed plan and start\n/goal approve - review a confirmation dialog\n/goal revise <feedback> - return to discussion\n/goal pause - stop goal-owned work\n/goal resume - continue an unchanged checkpoint; inspect and reapprove changed authority\n/goal status - show state, profiles, and pending plan\n/goal cancel - stop and leave goal mode\n\nNo default models are chosen. No automatic commits or merges. New plans include bounded in-scope continuation and repairs. Shell commands run only as displayed in an approved plan. Freeform dialogs are never required.`;
+const HELP = `Goal workflow\n\n/goal <feature> - start a deliberate feature interview\n/goal configure [role] - pick missing profile settings (or reconfigure one role)\n/goal profile <role> <provider/model> <thinking> [maxTurns] - save a default\n/goal override <role> <provider/model> <thinking> [maxTurns] - change this goal and invalidate approval\n/goal answer <text> - answer the pending question (ordinary chat also works)\n/goal approve <revision> - approve the displayed plan and start\n/goal approve - review a confirmation dialog\n/goal revise <feedback> - return to discussion\n/goal pause - stop goal-owned work\n/goal resume - continue an unchanged checkpoint; inspect and reapprove changed authority\n/goal status - show state, profiles, and pending plan\n/goal cancel - stop and leave goal mode\n\nNo default models are chosen. No automatic commits or merges. New plans continue while approved files change, pause on consecutive stalls, and retain bounded repair rounds. Shell commands run only as displayed in an approved plan. Freeform dialogs are never required.`;
 const SHORT = 16000;
 const clip = (value, max = SHORT) => {
   const content = String(value ?? "");
@@ -118,10 +119,7 @@ export function installGoal(pi, deps) {
         state && !["cancelled", "completed"].includes(state.phase)
           ? [
               state.feature.slice(0, 160),
-              ...state.progress.map(
-                (p) =>
-                  `${p.status}: ${state.plan?.steps.find((s) => s.id === p.id)?.title ?? p.id}`,
-              ),
+              ...state.progress.map((p) => renderStepProgress(state, p)),
             ]
           : undefined,
       );
@@ -981,7 +979,7 @@ export function installGoal(pi, deps) {
     name: "goal_execute",
     label: "Execute approved goal",
     description:
-      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. New approved plans support bounded in-scope continuation/repairs and explicit command checkpoints. Pauses for external blockers, retry limits, or cancellation. Never commits or grants new authority.",
+      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. New approved plans continue productive in-scope work without a total worker attempt cap, with bounded repair rounds and explicit command checkpoints. Pauses for consecutive no-file-progress attempts, external blockers, safety violations, or cancellation. Older policies retain their approved limits. Never commits or grants new authority.",
     parameters: parameters({}),
     async execute(_id, params, signal, onUpdate, ctx) {
       if (Object.keys(params).length)

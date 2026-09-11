@@ -74,7 +74,8 @@ async function fixture(
     prompts = [],
     requests = [],
     spawns = [],
-    execs = [];
+    execs = [],
+    widgets = [];
   const hooks = new Map(),
     tools = new Map(),
     commands = new Map();
@@ -196,7 +197,9 @@ async function fixture(
         notifications.push(message);
       },
       setStatus() {},
-      setWidget() {},
+      setWidget(name, lines) {
+        widgets.push({ name, lines });
+      },
       input() {
         throw new Error("Freeform dialogs must not be used");
       },
@@ -257,6 +260,7 @@ async function fixture(
     requests,
     spawns,
     execs,
+    widgets,
     controller,
     tools,
     ctx,
@@ -578,6 +582,89 @@ test("partial work continues under one approval without another research/plannin
   assert.equal(calls, 2);
   assert.equal(f.controller.getState().phase, "completed");
   assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
+});
+
+test("productive workers continue beyond four attempts through checks and review without resume", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  assert.equal(f.controller.getState().plan.execution.version, 2);
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  let attempts = 0;
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Implementer")) return;
+    attempts++;
+    assert.equal(f.controller.getState().approval, token);
+    assert.equal(
+      f.execs.length,
+      0,
+      "verification waits until the step completes",
+    );
+    await writeFile(
+      join(f.cwd, "greeting.txt"),
+      attempts === 6 ? "hello" : `partial ${attempts}`,
+    );
+    return {
+      id,
+      status: "completed",
+      result: JSON.stringify({
+        status: attempts === 6 ? "completed" : "continue",
+        summary: `Attempt ${attempts}`,
+        files: ["greeting.txt"],
+      }),
+    };
+  });
+  await f.call("goal_execute");
+  assert.equal(attempts, 6);
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(f.controller.getState().execution.history.length, 6);
+  assert.equal(f.execs.length, 1);
+  assert.equal(f.spawns.filter((r) => r.type.endsWith("Reviewer")).length, 1);
+  assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
+  assert.ok(!f.entries.some((e) => e.data.phase === "paused"));
+});
+
+test("stalled workers still pause with progress evidence and no misleading running widget", async (t) => {
+  const f = await fixture(t, { mode: "tui" });
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  let attempts = 0;
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Implementer")) return;
+    if (++attempts === 1)
+      await writeFile(join(f.cwd, "greeting.txt"), "partial");
+    return {
+      id,
+      status: "completed",
+      result: JSON.stringify({
+        status: "continue",
+        summary: "Greeting still needs work",
+        files: ["greeting.txt"],
+      }),
+    };
+  });
+  await assert.rejects(f.call("goal_execute"), (error) => {
+    assert.match(error.message, /No file progress in 2 consecutive attempts/);
+    assert.match(error.message, /results with observed file changes: 1/);
+    assert.match(error.message, /Greeting still needs work/);
+    assert.match(error.message, /Last worker observed file changes: none/);
+    assert.match(error.message, /Full worker evidence:/);
+    return true;
+  });
+  assert.equal(attempts, 3);
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(f.controller.getState().worker, null);
+  assert.equal(f.controller.getState().approval, token);
+  assert.match(f.widgets.at(-1).lines.join("\n"), /unfinished \(paused\)/);
+  assert.doesNotMatch(f.widgets.at(-1).lines.join("\n"), /in_progress/);
+  await assert.rejects(f.call("goal_execute"), /explicit approval/);
+  assert.equal(attempts, 3);
+  f.setRun(undefined);
+  await f.command("resume");
+  assert.equal(f.controller.getState().approval, token);
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
 });
 
 test("user resume retains approval and skips completed workers after a failed one-shot check", async (t) => {

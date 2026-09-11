@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   STATE_TYPE,
   EXECUTION_POLICY,
+  LEGACY_EXECUTION_POLICY,
   ROLES,
   THINKING,
   READ_TOOLS,
@@ -20,6 +21,8 @@ import {
   pause,
   restore,
   renderPlan,
+  renderStatus,
+  renderStepProgress,
 } from "../core.mjs";
 
 const cwd = "/project";
@@ -131,7 +134,7 @@ test("checkpoint policy and repeatability are explicit, validated and bound to a
   );
 });
 
-test("proposal renders checkpoint order, repeat permissions and bounded continuation", () => {
+test("proposal renders checkpoint order, repeat permissions and progress-based continuation", () => {
   const s = proposed();
   s.plan.execution = { ...EXECUTION_POLICY };
   s.plan.checks[0].afterStep = 0;
@@ -139,8 +142,75 @@ test("proposal renders checkpoint order, repeat permissions and bounded continua
   const output = renderPlan(s);
   assert.match(output, /before implementation/);
   assert.match(output, /automatic reruns authorized/);
-  assert.match(output, /up to 4 worker attempts/);
+  assert.match(output, /no total worker attempt cap/);
+  assert.match(output, /continued attempts consume tokens/);
+  assert.match(output, /2 consecutive no-file-progress continuation attempts/);
   assert.match(output, /2 repair rounds/);
+  assert.doesNotMatch(output, /up to 4 worker attempts/);
+  s.plan.execution = { ...LEGACY_EXECUTION_POLICY };
+  assert.match(renderPlan(s), /up to 4 worker attempts/);
+  assert.doesNotMatch(renderPlan(s), /no total worker attempt cap/);
+});
+
+test("versioned policies preserve old authority and require new approval to remove the cap", () => {
+  const s = proposed();
+  s.plan = validatePlan({ ...plan(), execution: LEGACY_EXECUTION_POLICY });
+  assert.deepEqual(s.plan.execution, LEGACY_EXECUTION_POLICY);
+  const token = approvalToken(s);
+  approve(s, token);
+  assert.equal(isApproved(s), true);
+  assert.equal(approvalToken({ ...s, plan: validatePlan(s.plan) }), token);
+  const restored = restore([entry(s)], cwd);
+  assert.deepEqual(restored.plan.execution, LEGACY_EXECUTION_POLICY);
+  assert.equal(restored.approval, null);
+  s.plan.execution = { ...EXECUTION_POLICY };
+  assert.notEqual(approvalToken(s), token);
+  assert.equal(isApproved(s), false);
+  for (const execution of [
+    { ...LEGACY_EXECUTION_POLICY, maxStepAttempts: null },
+    { ...EXECUTION_POLICY, maxStepAttempts: 4 },
+    { ...EXECUTION_POLICY, maxNoProgressAttempts: 0 },
+    { ...EXECUTION_POLICY, maxRepairAttempts: 3 },
+    { ...EXECUTION_POLICY, version: 3 },
+    { version: 2, maxRepairAttempts: 2, maxNoProgressAttempts: 2 },
+    null,
+  ])
+    assert.throws(() => validatePlan({ ...plan(), execution }), /Unsupported/);
+});
+
+test("paused status distinguishes unfinished work from active workers and includes observed progress", () => {
+  const s = approved();
+  s.progress[0].status = "in_progress";
+  s.phase = "executing";
+  assert.match(renderStepProgress(s, s.progress[0]), /^in_progress:/);
+  s.phase = "paused";
+  s.worker = null;
+  s.execution = {
+    history: [
+      {
+        step: 1,
+        summary: "Added greeting; more work remains",
+        observedChangedFiles: ["src/main.mjs"],
+        artifact: "memory:worker",
+      },
+    ],
+  };
+  const output = renderStatus(s);
+  assert.match(output, /No active goal worker/);
+  assert.match(output, /unfinished \(paused\): Implement/);
+  assert.doesNotMatch(output, /in_progress:/);
+  assert.match(output, /results with observed file changes: 1/);
+  assert.match(output, /Added greeting; more work remains/);
+  assert.match(output, /Last worker observed file changes: src\/main.mjs/);
+  assert.match(output, /Full worker evidence: memory:worker/);
+  assert.equal(
+    s.progress[0].status,
+    "in_progress",
+    "rendering must not mutate the execution journal",
+  );
+  s.worker = { role: "implementer", id: "unsettled-child" };
+  assert.doesNotMatch(renderStatus(s), /No active goal worker/);
+  assert.match(renderStatus(s), /unsettled-child/);
 });
 
 test("validatePlan normalizes, assigns step IDs and deduplicates exact files", () => {
