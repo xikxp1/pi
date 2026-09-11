@@ -8,6 +8,11 @@ agent/auth.json
 # Conversation history (contains project contents and prompts)
 agent/sessions/
 
+# Goal profiles, private artifacts, and generated bundled-agent copies
+agent/goal.json
+agent/goals/
+agent/agents/PiGoal*.md
+
 # Fetched provider catalog cache (etag/timestamps, regenerated on launch)
 agent/models-store.json
 

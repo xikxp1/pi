@@ -10,6 +10,7 @@
     "./packages/pi-claude-native",
     "npm:pi-web-access",
     "npm:@tintinweb/pi-subagents",
+    "./packages/pi-goal",
     "git:github.com/NVlabs/SoL-Pi"
   ],
   "terminal": {
