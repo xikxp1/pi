@@ -26,7 +26,20 @@ export default function (pi: ExtensionAPI) {
         files: ["greeting.txt"],
       },
     ],
-    checks: [{ command: 'test "$(cat greeting.txt)" = hello', timeout: 5 }],
+    checks: [
+      {
+        command: 'test "$(cat seed.txt)" = preserve-me',
+        timeout: 5,
+        afterStep: 0,
+        repeatable: true,
+      },
+      {
+        command: 'test "$(cat greeting.txt)" = hello',
+        timeout: 5,
+        afterStep: 1,
+        repeatable: true,
+      },
+    ],
   };
   const respond = (context: any, options: any, _state: any, model: any) => {
     const role =
@@ -53,6 +66,9 @@ export default function (pi: ExtensionAPI) {
           role,
           model: `${model.provider}/${model.id}`,
           reasoning: options?.reasoning,
+          continuation: userText.includes(
+            "Retained partial greeting needs completion",
+          ),
           tools: context.tools?.map((t: any) => t.name),
         }) + "\n",
       );
@@ -72,14 +88,23 @@ export default function (pi: ExtensionAPI) {
         : call("StructuredOutput", plan);
     }
     if (role === "PiGoalImplementer") {
-      if (!has("read")) return call("read", { path: "seed.txt" });
+      const continuing = userText.includes(
+        "Retained partial greeting needs completion",
+      );
+      if (!has("read"))
+        return call("read", { path: continuing ? "greeting.txt" : "seed.txt" });
       if (!has("write"))
-        return call("write", { path: "greeting.txt", content: "hello" });
+        return call("write", {
+          path: "greeting.txt",
+          content: continuing ? "hello" : "hel",
+        });
       return has("StructuredOutput")
         ? fauxAssistantMessage("Implementation recorded.")
         : call("StructuredOutput", {
-            status: "completed",
-            summary: "Created greeting.txt.",
+            status: continuing ? "completed" : "continue",
+            summary: continuing
+              ? "Completed greeting.txt."
+              : "Retained partial greeting needs completion",
             files: ["greeting.txt"],
           });
     }

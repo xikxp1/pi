@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   STATE_TYPE,
+  EXECUTION_POLICY,
   ROLES,
   THINKING,
   READ_TOOLS,
@@ -72,6 +73,75 @@ function approved() {
   return state;
 }
 const entry = (data) => ({ type: "custom", customType: STATE_TYPE, data });
+
+test("checkpoint policy and repeatability are explicit, validated and bound to approval", () => {
+  const input = plan();
+  input.execution = { ...EXECUTION_POLICY };
+  input.checks[0].afterStep = 0;
+  input.checks[0].repeatable = false;
+  const p = validatePlan(input);
+  assert.equal(p.checks[0].afterStep, 0);
+  assert.equal(p.checks[0].repeatable, false);
+  const s = proposed();
+  const legacyToken = approvalToken(s);
+  s.plan = p;
+  const token = approvalToken(s);
+  assert.notEqual(token, legacyToken);
+  s.plan.checks[0].repeatable = true;
+  assert.notEqual(approvalToken(s), token);
+  for (const afterStep of [-1, 2, 0.5, "0", null]) {
+    assert.throws(
+      () =>
+        validatePlan({ ...input, checks: [{ ...input.checks[0], afterStep }] }),
+      /afterStep/,
+    );
+  }
+  assert.throws(
+    () =>
+      validatePlan({
+        ...input,
+        checks: [{ ...input.checks[0], repeatable: "yes" }],
+      }),
+    /boolean/,
+  );
+  assert.throws(
+    () => validatePlan({ ...input, execution: undefined }),
+    /explicit execution policy/,
+  );
+  assert.throws(
+    () =>
+      validatePlan({
+        ...input,
+        execution: { ...EXECUTION_POLICY, maxStepAttempts: 1000 },
+      }),
+    /Unsupported/,
+  );
+  assert.throws(
+    () =>
+      validatePlan({
+        ...input,
+        execution: { ...EXECUTION_POLICY, unknown: true },
+      }),
+    /Unsupported/,
+  );
+  assert.equal(
+    validatePlan(plan()).execution,
+    undefined,
+    "legacy validation does not upgrade authority",
+  );
+});
+
+test("proposal renders checkpoint order, repeat permissions and bounded continuation", () => {
+  const s = proposed();
+  s.plan.execution = { ...EXECUTION_POLICY };
+  s.plan.checks[0].afterStep = 0;
+  s.plan.checks[0].repeatable = true;
+  const output = renderPlan(s);
+  assert.match(output, /before implementation/);
+  assert.match(output, /automatic reruns authorized/);
+  assert.match(output, /up to 4 worker attempts/);
+  assert.match(output, /2 repair rounds/);
+});
 
 test("validatePlan normalizes, assigns step IDs and deduplicates exact files", () => {
   const input = plan();

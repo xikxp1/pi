@@ -56,7 +56,7 @@ const bus = () => {
 };
 async function fixture(
   t,
-  { mode = "rpc", configured = true, replies = [] } = {},
+  { mode = "rpc", configured = true, replies = [], proposal = plan } = {},
 ) {
   const cwd = await mkdtemp(join(tmpdir(), "pi-goal-controller-"));
   const previousCwd = process.cwd();
@@ -81,6 +81,7 @@ async function fixture(
   let number = 0,
     confirm = true,
     execCode = 0,
+    execOverride,
     runOverride,
     snapshotOverride;
   const fakeClient = {
@@ -96,14 +97,16 @@ async function fixture(
       request.onSpawned(id);
       if (runOverride) {
         const outcome = await runOverride(request, id);
-        if (request.structuredOutput)
-          request.structuredOutput.check(JSON.parse(outcome.result));
-        return outcome;
+        if (outcome) {
+          if (request.structuredOutput)
+            request.structuredOutput.check(JSON.parse(outcome.result));
+          return outcome;
+        }
       }
       let result;
       if (request.type.endsWith("Researcher"))
         result = "Observed the project. greeting.txt is the intended new file.";
-      if (request.type.endsWith("Planner")) result = JSON.stringify(plan);
+      if (request.type.endsWith("Planner")) result = JSON.stringify(proposal);
       if (request.type.endsWith("Implementer")) {
         await writeFile(join(cwd, "greeting.txt"), "hello");
         result = JSON.stringify({
@@ -154,6 +157,7 @@ async function fixture(
     },
     async exec(command, args, options) {
       execs.push({ command, args, options });
+      if (execOverride) return execOverride(command, args, options);
       return {
         code: execCode,
         killed: false,
@@ -265,6 +269,9 @@ async function fixture(
     },
     setExecCode: (value) => {
       execCode = value;
+    },
+    setExec: (value) => {
+      execOverride = value;
     },
     setRun: (value) => {
       runOverride = value;
@@ -387,14 +394,17 @@ test("first use selects explicit models/thinking; cancellation guesses nothing",
   );
 });
 
-test("failed verification blocks completion and never launches reviewer or automatic repairs", async (t) => {
+test("failed one-shot verification pauses with approval retained and no automatic rerun", async (t) => {
   const f = await fixture(t);
   await f.readyPlan();
   await f.command(`approve ${approvalToken(f.controller.getState())}`);
   f.setExecCode(1);
   await assert.rejects(f.call("goal_execute"), /Verification failed/);
-  assert.equal(f.controller.getState().phase, "blocked");
-  assert.equal(f.controller.getState().approval, null);
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(
+    f.controller.getState().approval,
+    approvalToken(f.controller.getState()),
+  );
   assert.equal(f.spawns.filter((r) => r.type.endsWith("Reviewer")).length, 0);
   assert.equal(f.execs.length, 1);
 });
@@ -413,7 +423,11 @@ test("blocked worker status never becomes a completed step or a test run", async
     }),
   }));
   await assert.rejects(f.call("goal_execute"), /Need a user decision/);
-  assert.equal(f.controller.getState().phase, "blocked");
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(
+    f.controller.getState().approval,
+    approvalToken(f.controller.getState()),
+  );
   assert.equal(f.controller.getState().progress[0].status, "in_progress");
   assert.equal(f.execs.length, 0);
 });
@@ -434,7 +448,7 @@ test("pause during child execution stops advancement; resume requires fresh appr
     throw new DOMException("aborted", "AbortError");
   });
   const running = f.call("goal_execute");
-  const failed = assert.rejects(running, /aborted/);
+  const failed = assert.rejects(running, /aborted|cancelled/);
   await didStart;
   await f.command("pause");
   await failed;
@@ -443,7 +457,7 @@ test("pause during child execution stops advancement; resume requires fresh appr
   await f.command("resume");
   assert.equal(f.controller.getState().phase, "awaiting_approval");
   assert.equal(f.controller.getState().approval, null);
-  assert.equal(f.controller.getState().progress[0].status, "pending");
+  assert.notEqual(f.controller.getState().progress[0].status, "completed");
 });
 
 test("tree navigation restores the selected branch, not old in-memory state", async (t) => {
@@ -534,6 +548,314 @@ test("a pending resume snapshot cannot resurrect cancellation", async (t) => {
   await pending;
   assert.equal(f.controller.getState().phase, "cancelled");
   assert.equal(f.controller.getState().approval, null);
+});
+
+test("partial work continues under one approval without another research/planning round", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  let calls = 0;
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Implementer")) return;
+    calls++;
+    if (calls === 1) {
+      await writeFile(join(f.cwd, "greeting.txt"), "partial");
+      return {
+        id,
+        status: "completed",
+        result: JSON.stringify({
+          status: "continue",
+          summary: "Finish greeting text; no external blocker",
+          files: ["greeting.txt"],
+        }),
+      };
+    }
+    assert.match(request.prompt, /Finish greeting text/);
+    assert.equal(f.controller.getState().approval, token);
+  });
+  await f.call("goal_execute");
+  assert.equal(calls, 2);
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
+});
+
+test("user resume retains approval and skips completed workers after a failed one-shot check", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setExecCode(1);
+  await assert.rejects(
+    f.call("goal_execute"),
+    /not approved for automatic reruns/,
+  );
+  await assert.rejects(f.call("goal_execute"), /explicit approval/);
+  f.setExecCode(0);
+  await f.command("resume");
+  assert.equal(f.controller.getState().approval, token);
+  assert.equal(f.controller.getState().phase, "approved");
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(
+    f.spawns.filter((r) => r.type.endsWith("Implementer")).length,
+    1,
+  );
+  assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
+  assert.equal(f.execs.length, 2);
+});
+
+test("repeatable verification failures feed an in-scope repair and rerun before independent review", async (t) => {
+  const f = await fixture(t, {
+    proposal: {
+      ...plan,
+      checks: [{ ...plan.checks[0], afterStep: 1, repeatable: true }],
+    },
+  });
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setExecCode(1);
+  let repairs = 0;
+  f.setRun(async (request) => {
+    if (
+      request.type.endsWith("Implementer") &&
+      request.prompt.includes('"id":"repair-1"')
+    ) {
+      repairs++;
+      assert.match(request.prompt, /Verification failed/);
+      assert.equal(f.controller.getState().approval, token);
+      f.setExecCode(0);
+    }
+  });
+  await f.call("goal_execute");
+  assert.equal(repairs, 1);
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(f.execs.length, 2);
+});
+
+test("new chat feedback revokes paused approval before it can reach a continuation worker", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setExecCode(1);
+  await assert.rejects(f.call("goal_execute"));
+  assert.equal(f.controller.getState().approval, token);
+  await f.fire("input", {
+    text: "Change the requirement: implement new scope instead",
+    source: "rpc",
+  });
+  assert.equal(f.controller.getState().approval, null);
+  assert.equal(f.controller.getState().phase, "discussing");
+  assert.notEqual(approvalToken(f.controller.getState()), token);
+  await f.command("resume");
+  await assert.rejects(f.call("goal_execute"), /explicit approval/);
+  assert.equal(
+    f.spawns.filter((r) => r.type.endsWith("Implementer")).length,
+    1,
+  );
+});
+
+test("cancellation during post-command snapshot never replays a successful one-shot", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  let enter,
+    release,
+    intercepted = false;
+  const entered = new Promise((resolve) => {
+    enter = resolve;
+  });
+  f.setSnapshot(async (...args) => {
+    if (f.execs.length === 1 && !intercepted) {
+      intercepted = true;
+      enter();
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+    }
+    return snapshotFiles(...args);
+  });
+  const running = f.call("goal_execute");
+  const stopped = assert.rejects(running, /cancelled|aborted/);
+  await entered;
+  assert.deepEqual(f.controller.getState().execution.passed, [0]);
+  assert(f.entries.some((entry) => entry.data.execution?.passed.includes(0)));
+  await f.command("pause");
+  release();
+  await stopped;
+  f.setSnapshot(undefined);
+  await f.command("resume");
+  assert.equal(f.controller.getState().phase, "awaiting_approval");
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(
+    f.execs.length,
+    1,
+    "successful one-shot command must not replay",
+  );
+});
+
+test("checkpoint drift on resume requires reapproval without replanning or overwriting user edits", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const old = approvalToken(f.controller.getState());
+  await f.command(`approve ${old}`);
+  f.setExecCode(1);
+  await assert.rejects(f.call("goal_execute"));
+  await writeFile(join(f.cwd, "greeting.txt"), "user change");
+  await f.command("resume");
+  assert.equal(f.controller.getState().phase, "awaiting_approval");
+  assert.equal(f.controller.getState().approval, null);
+  assert.notEqual(approvalToken(f.controller.getState()), old);
+  assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
+  assert.equal(
+    await readFile(join(f.cwd, "greeting.txt"), "utf8"),
+    "user change",
+  );
+});
+
+test("settled missing worker output preserves an inspectable checkpoint and error artifact", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setRun(async (_request, id) => ({
+    id,
+    status: "completed",
+    result: JSON.stringify({ wrong: true }),
+  }));
+  await assert.rejects(f.call("goal_execute"), /valid StructuredOutput/);
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(f.controller.getState().approval, token);
+  const artifact = f.controller.getState().execution.history.at(-1).artifact;
+  assert.match(await readFile(artifact, "utf8"), /valid StructuredOutput/);
+  f.setRun(undefined);
+  await f.command("resume");
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
+});
+
+test("settled provider errors keep partial edits and resume without another approval", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setRun(async (_request, id) => {
+    await writeFile(
+      join(f.cwd, "greeting.txt"),
+      "partial before provider error",
+    );
+    const error = new Error("Provider temporarily unavailable");
+    error.event = { id, status: "error", error: error.message };
+    throw error;
+  });
+  await assert.rejects(
+    f.call("goal_execute"),
+    /Provider temporarily unavailable/,
+  );
+  assert.equal(f.controller.getState().approval, token);
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(
+    await readFile(join(f.cwd, "greeting.txt"), "utf8"),
+    "partial before provider error",
+  );
+  f.setRun(undefined);
+  await f.command("resume");
+  assert.equal(f.controller.getState().approval, token);
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
+});
+
+test("missing reviewer output resumes review only, not implementation or successful setup", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  f.setRun(async (request, id) => {
+    if (request.type.endsWith("Reviewer"))
+      return { id, status: "completed", result: "{}" };
+  });
+  await assert.rejects(
+    f.call("goal_execute"),
+    /Review stopped without a usable result/,
+  );
+  assert.equal(f.controller.getState().approval, token);
+  assert.equal(f.controller.getState().progress[0].status, "completed");
+  f.setRun(undefined);
+  await f.command("resume");
+  await f.call("goal_execute");
+  assert.equal(f.controller.getState().phase, "completed");
+  assert.equal(
+    f.spawns.filter((r) => r.type.endsWith("Implementer")).length,
+    1,
+  );
+  assert.equal(f.execs.length, 1);
+});
+
+test("revision planner receives failed checks and review findings rather than losing repair context", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Reviewer")) return;
+    return {
+      id,
+      status: "completed",
+      result: JSON.stringify({
+        verdict: "blocked",
+        summary: "Greeting lacks punctuation",
+        issues: ["Add punctuation"],
+        criteria: [
+          { criterion: plan.acceptance[0], evidence: "Read greeting.txt" },
+        ],
+      }),
+    };
+  });
+  await assert.rejects(f.call("goal_execute"), /Repair limit/);
+  await f.command("revise Address punctuation, retain implementation");
+  f.setRun(undefined);
+  await f.call("goal_plan");
+  const prompt = f.spawns
+    .filter((r) => r.type.endsWith("Planner"))
+    .at(-1).prompt;
+  assert.match(prompt, /Greeting lacks punctuation/);
+  assert.match(prompt, /check-1-/);
+  assert.match(prompt, /"status":"completed"/);
+});
+
+test("legacy restored plans retain their original execution policy", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const legacy = f.controller.getState();
+  delete legacy.plan.execution;
+  delete legacy.execution;
+  f.entries.splice(0, f.entries.length, {
+    type: "custom",
+    customType: STATE_TYPE,
+    data: legacy,
+  });
+  await f.fire("session_tree");
+  assert.equal(f.controller.getState().plan.execution, undefined);
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  f.setExecCode(1);
+  await assert.rejects(f.call("goal_execute"), /Verification failed/);
+  assert.equal(f.controller.getState().phase, "blocked");
+  assert.equal(f.controller.getState().approval, null);
+});
+
+test("restoring even a safely paused new checkpoint never restores executable approval", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  f.setExecCode(1);
+  await assert.rejects(f.call("goal_execute"));
+  await f.fire("session_tree");
+  assert.equal(f.controller.getState().approval, null);
+  await f.command("resume");
+  assert.equal(f.controller.getState().phase, "awaiting_approval");
 });
 
 test("stale approval cannot invalidate cancellation even when snapshot reports changed files", async (t) => {

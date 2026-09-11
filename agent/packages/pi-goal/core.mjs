@@ -1,6 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 
 export const STATE_TYPE = "pi-goal:state:v1";
+// Included in new proposals and their approval tokens. Legacy plans keep their
+// original stop-on-failure semantics until a new proposal is explicitly approved.
+export const EXECUTION_POLICY = Object.freeze({
+  version: 1,
+  maxStepAttempts: 4,
+  maxRepairAttempts: 2,
+  maxNoProgressAttempts: 2,
+});
 export const ROLES = ["researcher", "planner", "implementer", "reviewer"];
 export const THINKING = [
   "off",
@@ -144,10 +152,27 @@ export function validatePlan(value) {
     const timeout = check.timeout;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 600)
       throw new Error("Check timeout must be 1-600 seconds");
-    return {
+    const result = {
       command: text(check.command, "Verification command", 2000),
       timeout,
     };
+    if (check.afterStep !== undefined) {
+      if (
+        !Number.isInteger(check.afterStep) ||
+        check.afterStep < 0 ||
+        check.afterStep > steps.length
+      )
+        throw new Error(
+          "Check afterStep must be 0 through the number of steps",
+        );
+      result.afterStep = check.afterStep;
+    }
+    if (check.repeatable !== undefined) {
+      if (typeof check.repeatable !== "boolean")
+        throw new Error("Check repeatable must be boolean");
+      result.repeatable = check.repeatable;
+    }
+    return result;
   });
   const result = {
     title,
@@ -158,6 +183,25 @@ export function validatePlan(value) {
     steps,
     checks,
   };
+  if (value.execution !== undefined) {
+    if (
+      !value.execution ||
+      Object.keys(value.execution).length !==
+        Object.keys(EXECUTION_POLICY).length ||
+      Object.entries(EXECUTION_POLICY).some(
+        ([key, v]) => value.execution[key] !== v,
+      )
+    )
+      throw new Error("Unsupported execution policy");
+    result.execution = { ...EXECUTION_POLICY };
+  } else if (
+    checks.some(
+      (check) =>
+        check.afterStep !== undefined || check.repeatable !== undefined,
+    )
+  ) {
+    throw new Error("Checkpoint commands require an explicit execution policy");
+  }
   if (JSON.stringify(result).length > 50000)
     throw new Error("Plan exceeds 50,000 characters; simplify it");
   return result;
@@ -216,6 +260,8 @@ export const PLAN_SCHEMA = {
         properties: {
           command: { type: "string" },
           timeout: { type: "integer", minimum: 1, maximum: 600 },
+          afterStep: { type: "integer", minimum: 0, maximum: 12 },
+          repeatable: { type: "boolean" },
         },
       },
     },
@@ -303,7 +349,7 @@ export function newGoal(feature, cwd, defaults = {}) {
 }
 export function approvalToken(state) {
   if (!state.plan) throw new Error("There is no proposed plan");
-  return `${state.revision}-${hash({ id: state.id, plan: state.plan, profiles: state.profiles, baseline: state.baseline, answers: state.answers }).slice(0, 12)}`;
+  return `${state.revision}-${hash({ id: state.id, plan: state.plan, profiles: state.profiles, baseline: state.baseline, answers: state.answers, ...(state.plan.execution ? { feedback: state.feedback ?? [] } : {}) }).slice(0, 12)}`;
 }
 export function isApproved(state) {
   return Boolean(
@@ -317,8 +363,9 @@ export function invalidate(state, reason) {
   state.reason = reason;
   state.phase = "discussing";
   state.pendingQuestion = null;
-  state.review = null;
   state.worker = null;
+  // Keep failure evidence for the next planner; invalidation revokes authority,
+  // not the diagnosis of why the previous execution stopped.
 }
 export function askQuestion(state, value) {
   if (!["discussing", "awaiting_approval"].includes(state.phase))
@@ -365,6 +412,7 @@ export function propose(state, plan, baseline) {
   }));
   state.checks = [];
   state.review = null;
+  state.execution = null;
   state.phase = "awaiting_approval";
   state.reason = null;
 }
@@ -403,6 +451,7 @@ export function restore(entries, cwd) {
   // Restored approvals are never executable, including /tree and fork.
   if (
     ["approved", "executing", "planning"].includes(state.phase) ||
+    state.approval ||
     state.worker
   )
     pause(state, "Interrupted session. Inspect changes and use /goal resume.");
@@ -436,7 +485,7 @@ export function renderProfiles(value) {
 export function renderPlan(state) {
   const p = state.plan;
   if (!p) return "No plan proposed yet.";
-  return `## ${p.title}\n\n${p.summary}\n\n### Acceptance criteria\n${p.acceptance.map((c) => `- ${c}`).join("\n")}\n\n### Constraints\n${p.constraints.map((c) => `- ${c}`).join("\n") || "- None specified"}\n\n### Steps\n${p.steps.map((s) => `${s.id}. **${s.title}**\n   Files: ${s.files.join(", ")}\n   ${s.instructions}`).join("\n\n")}\n\n### Verification (executed exactly as approved)\n${p.checks.map((c) => `- ${JSON.stringify(c.command)} (timeout ${c.timeout}s)`).join("\n")}\n\n### Risks\n${p.risks.map((c) => `- ${c}`).join("\n") || "- None identified"}\n\n### Role profiles\n${renderProfiles(state.profiles)}\n\nOne writer at a time. Workers have read/edit/write tools, no shell or nested agents. Verification commands run in ${state.cwd}. No automatic commits or merges. Review failure stops for your input; no automatic repair loop.\n\n**Revision: ${approvalToken(state)}**\nUse /goal approve ${approvalToken(state)} to approve and start, or /goal revise <feedback>.`;
+  return `## ${p.title}\n\n${p.summary}\n\n### Acceptance criteria\n${p.acceptance.map((c) => `- ${c}`).join("\n")}\n\n### Constraints\n${p.constraints.map((c) => `- ${c}`).join("\n") || "- None specified"}\n\n### Steps\n${p.steps.map((s) => `${s.id}. **${s.title}**\n   Files: ${s.files.join(", ")}\n   ${s.instructions}`).join("\n\n")}\n\n### Verification (executed exactly as approved)\n${p.checks.map((c) => `- ${JSON.stringify(c.command)} (timeout ${c.timeout}s${p.execution ? `; ${c.afterStep === 0 ? "before implementation" : `after step ${c.afterStep ?? p.steps.length}`}; ${c.repeatable === true ? "automatic reruns authorized" : "one-shot, no automatic rerun"}` : ""})`).join("\n")}\n\n### Risks\n${p.risks.map((c) => `- ${c}`).join("\n") || "- None identified"}\n\n### Role profiles\n${renderProfiles(state.profiles)}\n\nOne writer at a time. Workers have read/edit/write tools, no shell or nested agents. Verification commands run in ${state.cwd}. No automatic commits or merges. ${p.execution ? `Approval includes bounded continuation: up to ${p.execution.maxStepAttempts} worker attempts per step/repair, ${p.execution.maxRepairAttempts} repair rounds, and ${p.execution.maxNoProgressAttempts} consecutive no-progress attempts before pausing. Repairs stay within files from reached steps; only commands marked repeatable may rerun automatically. /goal resume can continue an unchanged checkpoint without another approval and explicitly retries a failed one-shot command. New scope, commands, profiles or external file changes require fresh approval.` : "Review failure stops for your input; no automatic repair loop."}\n\n**Revision: ${approvalToken(state)}**\nUse /goal approve ${approvalToken(state)} to approve and start, or /goal revise <feedback>.`;
 }
 export function renderStatus(state) {
   if (!state) return "No active goal. Start with /goal <feature>.";

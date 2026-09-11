@@ -248,6 +248,19 @@ test(
       .trim()
       .split("\n")
       .map(JSON.parse);
+    assert(
+      calls.some(
+        (call) => call.role === "PiGoalImplementer" && !call.continuation,
+      ),
+    );
+    assert(
+      calls.some(
+        (call) => call.role === "PiGoalImplementer" && call.continuation,
+      ),
+      "Partial implementation did not continue under the same approval",
+    );
+    assert.match(text(proposed), /before implementation/);
+    assert.match(text(proposed), /automatic reruns authorized/);
     for (const role of [
       "PiGoalResearcher",
       "PiGoalPlanner",

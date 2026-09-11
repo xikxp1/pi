@@ -1,6 +1,8 @@
 import { SubagentClient } from "./subagents.mjs";
+import { ContinuationPause, runBoundedExecution } from "./execution.mjs";
 import {
   STATE_TYPE,
+  EXECUTION_POLICY,
   ROLES,
   TURN_LIMITS,
   AGENT_TYPES,
@@ -40,7 +42,7 @@ import {
   saveArtifact,
 } from "./storage.mjs";
 
-const HELP = `Goal workflow\n\n/goal <feature> - start a deliberate feature interview\n/goal configure [role] - pick missing profile settings (or reconfigure one role)\n/goal profile <role> <provider/model> <thinking> [maxTurns] - save a default\n/goal override <role> <provider/model> <thinking> [maxTurns] - change this goal and invalidate approval\n/goal answer <text> - answer the pending question (ordinary chat also works)\n/goal approve <revision> - approve the displayed plan and start\n/goal approve - review a confirmation dialog\n/goal revise <feedback> - return to discussion\n/goal pause - stop goal-owned work\n/goal resume - inspect current files and request fresh approval\n/goal status - show state, profiles, and pending plan\n/goal cancel - stop and leave goal mode\n\nNo default models are chosen. No automatic commits, merges, or repair loops. Shell commands run only as displayed in an approved plan. Freeform dialogs are never required.`;
+const HELP = `Goal workflow\n\n/goal <feature> - start a deliberate feature interview\n/goal configure [role] - pick missing profile settings (or reconfigure one role)\n/goal profile <role> <provider/model> <thinking> [maxTurns] - save a default\n/goal override <role> <provider/model> <thinking> [maxTurns] - change this goal and invalidate approval\n/goal answer <text> - answer the pending question (ordinary chat also works)\n/goal approve <revision> - approve the displayed plan and start\n/goal approve - review a confirmation dialog\n/goal revise <feedback> - return to discussion\n/goal pause - stop goal-owned work\n/goal resume - continue an unchanged checkpoint; inspect and reapprove changed authority\n/goal status - show state, profiles, and pending plan\n/goal cancel - stop and leave goal mode\n\nNo default models are chosen. No automatic commits or merges. New plans include bounded in-scope continuation and repairs. Shell commands run only as displayed in an approved plan. Freeform dialogs are never required.`;
 const SHORT = 16000;
 const clip = (value, max = SHORT) => {
   const content = String(value ?? "");
@@ -64,14 +66,16 @@ const WORK_SCHEMA = {
   additionalProperties: false,
   required: ["status", "summary", "files"],
   properties: {
-    status: { type: "string", enum: ["completed", "blocked"] },
+    status: { type: "string", enum: ["completed", "continue", "blocked"] },
     summary: { type: "string" },
     files: { type: "array", items: { type: "string" } },
   },
 };
 function validateWork(value, step) {
-  if (!value || !["completed", "blocked"].includes(value.status))
-    throw new Error("Worker must report completed or blocked");
+  if (!value || !["completed", "continue", "blocked"].includes(value.status))
+    throw new Error(
+      "Worker must report completed, continue (unfinished), or blocked (external input required)",
+    );
   const summary = text(value.summary, "Worker summary", 12000);
   if (
     !Array.isArray(value.files) ||
@@ -300,9 +304,15 @@ export function installGoal(pi, deps) {
         runtimeActive &&
         !["cancelled", "paused"].includes(goal.phase)
       ) {
-        goal.approval = null;
+        const resumable =
+          error instanceof ContinuationPause &&
+          !controller.signal.aborted &&
+          !client?.hasUnsettled &&
+          isApproved(goal) &&
+          goal.execution?.token === approvalToken(goal);
+        if (!resumable) goal.approval = null;
         goal.phase =
-          controller.signal.aborted || error.name === "AbortError"
+          resumable || controller.signal.aborted || error.name === "AbortError"
             ? "paused"
             : "blocked";
         goal.reason = error.message;
@@ -355,26 +365,53 @@ export function installGoal(pi, deps) {
           },
         }
       : undefined;
-    let outcome = await client.run({
-      type: AGENT_TYPES[role],
-      prompt,
-      model: p.model,
-      thinkingLevel: p.thinking,
-      maxTurns: p.maxTurns,
-      cwd: ctx.cwd,
-      signal,
-      structuredOutput: capture,
-      onSpawned(id) {
-        if (state === goal && runtimeActive) {
-          goal.worker = { role, id };
-          persist(ctx);
-        }
-      },
-    });
+    let outcome;
+    try {
+      outcome = await client.run({
+        type: AGENT_TYPES[role],
+        prompt,
+        model: p.model,
+        thinkingLevel: p.thinking,
+        maxTurns: p.maxTurns,
+        cwd: ctx.cwd,
+        signal,
+        structuredOutput: capture,
+        onSpawned(id) {
+          if (state === goal && runtimeActive) {
+            goal.worker = { role, id };
+            persist(ctx);
+          }
+        },
+      });
+    } catch (error) {
+      current();
+      error.artifact = await record(ctx, goal, role, {
+        ...(error.event ?? {}),
+        error: error.message,
+        capturedJson,
+        profile: p,
+      });
+      current();
+      error.settledChild =
+        !client.hasUnsettled &&
+        ["completed", "failed", "error"].includes(error.event?.status);
+      throw error;
+    }
     current();
     if (structuredOutput) {
-      if (capturedJson === undefined)
-        throw new Error(`${role} did not submit valid StructuredOutput`);
+      if (capturedJson === undefined) {
+        const error = new Error(
+          `${role} did not submit valid StructuredOutput`,
+        );
+        error.artifact = await record(ctx, goal, role, {
+          ...outcome,
+          error: error.message,
+          profile: p,
+        });
+        current();
+        error.settledChild = !client.hasUnsettled;
+        throw error;
+      }
       outcome = { ...outcome, rawResult: outcome.result, result: capturedJson };
     }
     const path = await record(ctx, goal, role, { ...outcome, profile: p });
@@ -382,6 +419,93 @@ export function installGoal(pi, deps) {
     goal.worker = null;
     persist(ctx);
     return { outcome, path };
+  }
+
+  async function executeBounded(ctx, goal, signal, current, onUpdate) {
+    const token = approvalToken(goal);
+    const checkApproval = () => {
+      current();
+      if (!isApproved(goal) || approvalToken(goal) !== token)
+        throw new Error("Approval changed during execution");
+    };
+    checkApproval();
+    goal.phase = "executing";
+    goal.reason = null;
+    persist(ctx);
+    const snapshots = await runBoundedExecution({
+      goal,
+      snapshot: () => snapshot(ctx.cwd, goal.plan),
+      checkApproval,
+      persist: () => persist(ctx),
+      notify: (message) => onUpdate?.(toolResult(message)),
+      record: (label, value) => record(ctx, goal, label, value),
+      exec: (check) =>
+        pi.exec("bash", ["-lc", check.command], {
+          cwd: ctx.cwd,
+          signal,
+          timeout: check.timeout * 1000,
+        }),
+      work: async (step, feedback) => {
+        const result = await child(
+          ctx,
+          goal,
+          "implementer",
+          `${contextFor(goal)}\n\nAPPROVED PLAN revision ${token}:\n${JSON.stringify(goal.plan)}\n\nImplement ONLY this delegated step or in-scope repair:\n${JSON.stringify(step)}\n\nCompleted steps:\n${JSON.stringify(goal.progress.filter((p) => p.status === "completed"))}\n\n${feedback}\n\nFinish real code rather than stopping after research. Inspect retained edits and complete the missing work. Report status completed when this step's code is finished; tests run at the coordinator's approved checkpoints, so not having run tests yourself is NOT a blocker. If code remains unfinished, use status continue with exact remaining tasks, never blocked merely because this invocation is unfinished. Use blocked ONLY for a concrete external dependency, a new consequential user decision, or an operation outside approved scope. Do not run shell commands, tests, commits or delegation. Return exact changed files through StructuredOutput.`,
+          signal,
+          current,
+          compiled(WORK_SCHEMA, (value) => validateWork(value, step)),
+          onUpdate,
+        );
+        checkApproval();
+        return {
+          ...validateWork(JSON.parse(result.outcome.result), step),
+          artifact: result.path,
+        };
+      },
+      review: async (evidence, initial) => {
+        const result = await child(
+          ctx,
+          goal,
+          "reviewer",
+          `${contextFor(goal)}\n\nAPPROVED PLAN:\n${JSON.stringify(goal.plan)}\n\nWorker reports (claims, not proof):\n${JSON.stringify(goal.progress)}\n\nExecution evidence, including prior failures and repairs:\n${evidence}\n\nInitial file snapshot:\n${JSON.stringify(initial)}\n\nIndependently READ current source and full linked artifacts. A failed historical check is not an outstanding failure if its latest rerun passed. Cover every acceptance criterion exactly in order. Require actual feature delivery, not preparation-only claims. Report pass only when all criteria are supported and no issues remain; otherwise return actionable issues. No edits, shell or delegation.`,
+          signal,
+          current,
+          compiled(REVIEW_SCHEMA, (value) =>
+            validateReview(value, goal.plan.acceptance),
+          ),
+          onUpdate,
+        );
+        checkApproval();
+        return {
+          ...validateReview(
+            JSON.parse(result.outcome.result),
+            goal.plan.acceptance,
+          ),
+          artifact: result.path,
+        };
+      },
+    });
+    checkApproval();
+    const path = await record(ctx, goal, "outcome", {
+      goalId: goal.id,
+      revision: token,
+      phase: "completed",
+      progress: goal.progress,
+      checks: goal.checks,
+      review: goal.review,
+      execution: goal.execution,
+      before: snapshots.initial,
+      after: snapshots.after,
+    });
+    checkApproval();
+    goal.phase = "completed";
+    goal.approval = null;
+    goal.reason = null;
+    goal.worker = null;
+    persist(ctx);
+    const content = `Goal completed.\n\n${goal.review.summary}\n\n${goal.review.criteria.map((c) => `- ${c.criterion}: ${c.evidence}`).join("\n")}\n\nVerification: ${goal.execution.passed.length} approved commands passed; ${goal.checks.length} total attempts recorded.\nFull outcome: ${path}\nNo commits were created by the goal workflow.`;
+    show(ctx, content);
+    return toolResult(content, { artifact: path, phase: goal.phase }, true);
   }
 
   async function command(args, ctx) {
@@ -474,7 +598,7 @@ export function installGoal(pi, deps) {
         invalidate(goal, "User requested revision");
         persist(ctx);
         kickoff(
-          "Revise the goal using the recorded user feedback. Investigate and ask consequential questions before proposing a new plan with goal_plan.",
+          "Revise the goal using the recorded feedback and preserved execution evidence. Reuse research and recorded decisions. Ask only if a materially new consequential decision is needed; otherwise call goal_plan directly. Do not restart preparation or shrink the user's delivery goal.",
         );
         return;
       }
@@ -493,6 +617,73 @@ export function installGoal(pi, deps) {
             kickoff(
               "Resume the goal interview. Read the persisted goal state and continue without assuming missing decisions.",
             );
+          return;
+        }
+        if (goal.plan.execution) {
+          const epoch = generation;
+          const phase = goal.phase;
+          const revision = goal.revision;
+          const baseline = await snapshot(ctx.cwd, goal.plan);
+          if (
+            !runtimeActive ||
+            state !== goal ||
+            epoch !== generation ||
+            goal.phase !== phase ||
+            goal.revision !== revision
+          )
+            return;
+          const journal = goal.execution;
+          if (
+            journal &&
+            journal.token === approvalToken(goal) &&
+            goal.approval === journal.token &&
+            hash(baseline) === hash(journal.expected)
+          ) {
+            journal.attempts = {};
+            journal.noProgress = {};
+            journal.repairs = 0;
+            goal.phase = "approved";
+            goal.reason = null;
+            persist(ctx);
+            show(
+              ctx,
+              "Continuing the approved scope from its unchanged checkpoint. Completed work and successful one-shot commands will not replay. Any failed one-shot command is explicitly authorized to retry by /goal resume.",
+            );
+            kickoff(
+              "The user requested continuation of the still-approved goal checkpoint. Call goal_execute now. Do not replan or ask for the same approval again.",
+            );
+            return;
+          }
+          // Interrupted/restored authority or external changes need a visible
+          // new approval, not another interview or replacement implementation plan.
+          if (journal) {
+            const changed = changedFiles(journal.expected, baseline);
+            for (const item of goal.progress) {
+              if (
+                goal.plan.steps
+                  .find((s) => s.id === item.id)
+                  .files.some((file) => changed.includes(file))
+              )
+                item.status = "pending";
+            }
+            journal.cursor = 0;
+            journal.expected = baseline;
+            journal.attempts = {};
+            journal.noProgress = {};
+            journal.repairs = 0;
+            journal.passed = journal.passed.filter(
+              (i) => goal.plan.checks[i].repeatable !== true,
+            );
+          }
+          goal.baseline = baseline;
+          goal.revision++;
+          goal.approval = null;
+          goal.phase = "awaiting_approval";
+          if (journal) journal.token = approvalToken(goal);
+          goal.reason =
+            "Review current files and reapprove the retained plan after interruption or changed authority. No new interview or preparation stage is required.";
+          persist(ctx);
+          show(ctx, `${goal.reason}\n\n${renderPlan(goal)}`);
           return;
         }
         // A failed review needs a newly reviewed repair plan, not replay of an
@@ -749,13 +940,18 @@ export function installGoal(pi, deps) {
           ctx,
           goal,
           "planner",
-          `${contextFor(goal)}\n\nPlanning focus:\n${params.focus ? text(params.focus, "Planning focus", 6000) : "Implement the clarified feature."}\n\nPrevious plan (if revising):\n${JSON.stringify(goal.plan)}\n\nCreate a plan with precise file ownership, independently testable acceptance criteria, risks, and exact verification commands. Every step runs sequentially with an edit-only implementer; the coordinator executes verification commands afterward. Follow the StructuredOutput schema. Unresolved consequential decisions must be listed as risks, not silently assumed. The user will review the entire plan before any implementation.`,
+          `${contextFor(goal)}\n\nPlanning focus:\n${params.focus ? text(params.focus, "Planning focus", 6000) : "Implement the clarified feature."}\n\nPrevious plan (if revising):\n${JSON.stringify(goal.plan)}\n\nPrevious execution evidence (preserve completed edits and diagnose the actual failure):\n${JSON.stringify({ reason: goal.reason, progress: goal.progress, checks: goal.checks, review: goal.review, execution: goal.execution })}\n\nCreate a plan that delivers the user's feature, not a preparation-only substitute. Use small code-writing steps with precise file ownership and independently testable acceptance criteria. Every step runs sequentially with an edit-only implementer. The coordinator runs each exact command at its afterStep checkpoint: 0 BEFORE any worker, or N immediately AFTER step N. Put Git/dependency/generation prerequisites before the workers that need them, and build/test checks incrementally rather than only at the end. Set repeatable:true ONLY for commands whose side effects the user can safely authorize to repeat during repairs; setup/install/deployment commands should normally be repeatable:false. Omitted afterStep means after the last step; omitted repeatable means no automatic rerun. The coordinator attaches a visible, token-bound bounded continuation policy (four worker attempts per step, two repair rounds, two consecutive no-progress attempts). Repairs are limited to files of reached steps; include necessary generated/lock files among declared targets. Do not require a new approval merely for unfinished in-scope work. Follow the StructuredOutput schema. Unresolved consequential decisions must be listed as risks, not silently assumed. The user will review the entire plan before any implementation.`,
           childSignal,
           current,
-          compiled(PLAN_SCHEMA, validatePlan),
+          compiled(PLAN_SCHEMA, (value) =>
+            validatePlan({ ...value, execution: EXECUTION_POLICY }),
+          ),
           onUpdate,
         );
-        const plan = validatePlan(JSON.parse(result.outcome.result));
+        const plan = validatePlan({
+          ...JSON.parse(result.outcome.result),
+          execution: EXECUTION_POLICY,
+        });
         const baseline = await snapshot(ctx.cwd, plan);
         current();
         propose(goal, plan, baseline);
@@ -785,7 +981,7 @@ export function installGoal(pi, deps) {
     name: "goal_execute",
     label: "Execute approved goal",
     description:
-      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. Stops on failures or cancellation, without automatic repair or commits.",
+      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. New approved plans support bounded in-scope continuation/repairs and explicit command checkpoints. Pauses for external blockers, retry limits, or cancellation. Never commits or grants new authority.",
     parameters: parameters({}),
     async execute(_id, params, signal, onUpdate, ctx) {
       if (Object.keys(params).length)
@@ -795,6 +991,8 @@ export function installGoal(pi, deps) {
           "Implementation requires explicit approval of the current plan revision",
         );
       return runOperation(ctx, signal, async (goal, childSignal, current) => {
+        if (goal.plan.execution)
+          return executeBounded(ctx, goal, childSignal, current, onUpdate);
         const initial = await snapshot(ctx.cwd, goal.plan);
         if (hash(initial) !== hash(goal.baseline))
           throw new Error(
@@ -976,7 +1174,7 @@ export function installGoal(pi, deps) {
       .join("\n\n");
     if (!state || ["completed", "cancelled"].includes(state.phase)) return;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n[GOAL WORKFLOW - EXTENSION-OWNED STATE]\n${renderStatus(state)}\n\nYou are the goal coordinator, not an implementation worker. Parent file writes, shell, unknown tools, and uncontrolled agents are blocked. Use goal_research for read-only investigation, then goal_question to ask ONE consequential feature question at a time. Read/search tools and todo are available. Do not ask for facts discoverable from code. At least one actual user answer is required; ordinary replies NEVER authorize implementation. When requirements are clear, call goal_plan alone to obtain a planner-produced proposal and STOP for approval. Only /goal approve authorizes goal_execute. After approval call goal_execute alone; it owns worker sequencing, checks and review. Never bypass these controls through wrappers. If waiting, paused, or blocked, explain the next user action and stop; do not loop or self-resume. Unknown consequential decisions and new scope require user input. Reflect goal progress through todo when useful, but only goal-owned state decides completion.`,
+      systemPrompt: `${event.systemPrompt}\n\n[GOAL WORKFLOW - EXTENSION-OWNED STATE]\n${renderStatus(state)}\n\nYou are the goal coordinator, not an implementation worker. Parent file writes, shell, unknown tools, and uncontrolled agents are blocked. For a NEW goal use goal_research for read-only investigation, then goal_question to ask ONE consequential feature question at a time. For revisions reuse existing research and answers; only ask again for a materially new consequential decision. Read/search tools and todo are available. Do not ask for facts discoverable from code. At least one actual user answer is required; ordinary replies NEVER authorize implementation. When requirements are clear, call goal_plan alone to obtain a planner-produced proposal and STOP for approval. Only /goal approve authorizes goal_execute. After approval call goal_execute alone; it owns worker sequencing, checks and review. Never bypass these controls through wrappers. Unfinished workers and repairable failures are handled inside goal_execute under the approved policy, not by new interviews or preparation stages. If waiting, paused, or blocked, explain the next user action and stop; do not loop or self-resume. For an unchanged approved checkpoint recommend /goal resume, not /goal revise or another approval. Unknown consequential decisions and new scope require user input. Reflect goal progress through todo when useful, but only goal-owned state decides completion.`,
     };
   });
   pi.on("tool_call", (event) => {
@@ -1013,7 +1211,7 @@ export function installGoal(pi, deps) {
         false,
         "New user input interrupted goal execution; use /goal revise or /goal resume",
       );
-    } else if (state.phase === "awaiting_approval") {
+    } else if (state.phase === "awaiting_approval" || state.approval) {
       invalidate(
         state,
         "User feedback changed the proposal. Ordinary chat is not approval.",
