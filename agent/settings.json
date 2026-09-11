@@ -9,7 +9,8 @@
     "npm:pi-ask-user",
     "./packages/pi-claude-native",
     "npm:pi-web-access",
-    "npm:@tintinweb/pi-subagents"
+    "npm:@tintinweb/pi-subagents",
+    "git:github.com/NVlabs/SoL-Pi"
   ],
   "terminal": {
     "showTerminalProgress": true
