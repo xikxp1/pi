@@ -104,7 +104,7 @@ export async function ensureAgents(agentDir, cwd, parseFrontmatter) {
   }
   if (seen.size !== ROLES.length)
     throw new Error("Goal agent definitions are incomplete");
-  // RPC spawn reloads definitions from process.cwd in pi-subagents 0.19.0.
+  // Preserve the existing goal cwd fence across the local runtime migration.
   if ((await realpath(cwd)) !== (await realpath(process.cwd())))
     throw new Error(
       "Subagent runtime cwd differs from this session. Restart Pi in the project directory.",

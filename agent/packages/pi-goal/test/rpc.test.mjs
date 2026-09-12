@@ -20,12 +20,7 @@ const hasPi =
 const root = fileURLToPath(new URL("../", import.meta.url));
 const subagents =
   process.env.PI_GOAL_TEST_SUBAGENTS ??
-  fileURLToPath(
-    new URL(
-      "../../../npm/node_modules/@tintinweb/pi-subagents/src/index.ts",
-      import.meta.url,
-    ),
-  );
+  fileURLToPath(new URL("../../pi-subagents/index.ts", import.meta.url));
 let hasSubagents = true;
 try {
   await access(subagents);
@@ -34,7 +29,7 @@ try {
 }
 
 test(
-  "real Pi RPC + installed subagents: offline interview, approval, scoped child tools, checks and review",
+  "real Pi RPC + local subagents: offline interview, approval, scoped child tools, checks and review",
   { skip: !hasPi || !hasSubagents, timeout: 90000 },
   async (t) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-goal-rpc-"));
@@ -214,6 +209,12 @@ test(
           event.method === "notify" &&
           event.message?.includes("Which greeting"),
       ),
+      JSON.stringify(
+        events.filter(
+          (e) =>
+            e.type === "tool_execution_end" || e.type === "extension_error",
+        ),
+      ) + stderr,
     );
     assert(
       !events.some(
@@ -259,6 +260,16 @@ test(
       ),
       "Partial implementation did not continue under the same approval",
     );
+    assert(
+      calls.some(
+        (call) =>
+          call.role === "PiGoalImplementer" &&
+          call.continuation &&
+          call.priorStructuredOutputs > 0,
+      ),
+      "Continuation must retain the original worker's tool history, not spawn a fresh session",
+    );
+    assert.match(text(proposed), /per checkpoint/);
     assert.match(text(proposed), /before implementation/);
     assert.match(text(proposed), /automatic reruns authorized/);
     for (const role of [

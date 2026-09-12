@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   EXECUTION_POLICY,
   LEGACY_EXECUTION_POLICY,
+  V2_EXECUTION_POLICY,
   ROLES,
   newGoal,
   askQuestion,
@@ -153,10 +154,10 @@ function harness({
       if (hooks.snapshot) await hooks.snapshot(h);
       return structuredClone(files);
     },
-    work: async (s, f) => {
+    work: async (s, f, metadata) => {
       events.push(`work:${s.id}`);
       feedback.push(f);
-      if (hooks.work) return hooks.work(s, f, h);
+      if (hooks.work) return hooks.work(s, f, h, metadata);
       h.put(s.files[0], `implemented ${events.length}`);
       return report("completed", s.files);
     },
@@ -657,6 +658,171 @@ test("approval revoked during a worker prevents adopting effects or continuing",
   assert.deepEqual(h.events, ["work:1"]);
   assert.deepEqual(h.goal.execution.expected, h.baseline);
   assert.notEqual(h.goal.progress[0].status, "completed");
+});
+
+for (const execution of [LEGACY_EXECUTION_POLICY, V2_EXECUTION_POLICY]) {
+  test(`v${execution.version} retains global repair budget and omits worker metadata`, async () => {
+    const h = harness({
+      execution,
+      checks: [check("first", 1), check("second", 1)],
+      exec(c, h) {
+        return output(
+          c.command === "first" && h.goal.execution.repairs >= 2 ? 0 : 1,
+        );
+      },
+      work(s, f, h, metadata) {
+        assert.equal(metadata, undefined);
+        h.put("a.mjs", `${h.events.length}`);
+        return report();
+      },
+    });
+    await pauses(h, /Repair limit/);
+    assert.equal(h.goal.execution.repairs, 2);
+    assert.equal(h.goal.execution.repairsByCheckpoint, undefined);
+    assert.equal(h.goal.execution.reachedSteps, undefined);
+    assert.equal(h.goal.checks.at(-1).command, "second");
+  });
+}
+
+test("v2 productive continuation remains uncapped", async () => {
+  let attempts = 0;
+  const h = harness({
+    execution: V2_EXECUTION_POLICY,
+    work(s, f, h, metadata) {
+      assert.equal(metadata, undefined);
+      h.put("a.mjs", `${++attempts}`);
+      return report(attempts < 7 ? "continue" : "completed");
+    },
+  });
+  await h.run();
+  assert.equal(attempts, 7);
+});
+
+test("v3 each check and review gets two repairs with stable workers across rounds and partial results", async () => {
+  const keys = [];
+  const h = harness({
+    // Duplicate commands still have distinct index-based budgets.
+    checks: [check("same", 1), check("same", 1)],
+    exec(c, h) {
+      const index = h.goal.plan.checks.indexOf(c);
+      return output(
+        (h.goal.execution.repairsByCheckpoint[`check-${index}`] ?? 0) < 2
+          ? 1
+          : 0,
+      );
+    },
+    review(e, i, h) {
+      return h.assessment(
+        (h.goal.execution.repairsByCheckpoint.review ?? 0) < 2
+          ? "blocked"
+          : "pass",
+      );
+    },
+    work(s, f, h, metadata) {
+      keys.push(metadata.workerKey);
+      h.put("a.mjs", `${h.events.length}`);
+      const attempt =
+        h.goal.execution.attempts[
+          typeof s.id === "number" ? `step-${s.id}` : s.id
+        ];
+      return report(attempt === 1 ? "continue" : "completed");
+    },
+  });
+  await h.run();
+  assert.deepEqual(h.goal.execution.repairsByCheckpoint, {
+    "check-0": 2,
+    "check-1": 2,
+    review: 2,
+  });
+  assert.equal(h.goal.execution.repairs, 6);
+  assert.deepEqual(keys, [
+    "step-1",
+    "step-1",
+    ...["check-0", "check-1", "review"].flatMap((key) =>
+      Array(4).fill(`repair:${key}`),
+    ),
+  ]);
+  for (let round = 1; round <= 6; round++)
+    assert.equal(h.goal.execution.attempts[`repair-${round}`], 2);
+  h.assertAuthority();
+});
+
+test("v3 passing another checkpoint never replenishes a prior repair budget", async () => {
+  const outcomes = { first: [1, 0, 1, 0, 1], second: [1, 1] };
+  const h = harness({
+    checks: [check("first", 1), check("second", 1)],
+    exec(c) {
+      assert.ok(
+        outcomes[c.command].length,
+        "must stop before unbounded revalidation",
+      );
+      return output(outcomes[c.command].shift());
+    },
+  });
+  await pauses(h, /Repair limit \(2\) reached for check-0/);
+  assert.deepEqual(h.goal.execution.repairsByCheckpoint, {
+    "check-0": 2,
+    "check-1": 2,
+  });
+  assert.equal(h.goal.execution.repairs, 4);
+  assert.equal(h.goal.execution.pendingRepair, null);
+});
+
+for (const execution of [
+  LEGACY_EXECUTION_POLICY,
+  V2_EXECUTION_POLICY,
+  EXECUTION_POLICY,
+]) {
+  test(`v${execution.version} rewind repair scope preserves versioned semantics`, async () => {
+    let early = 0;
+    const scopes = [];
+    const h = harness({
+      execution,
+      steps: [step("a.mjs"), step("b.mjs"), step("unreached.mjs")],
+      checks: [check("early", 1), check("late", 2)],
+      exec(c) {
+        return output(c.command === "early" ? (++early === 1 ? 0 : 1) : 1);
+      },
+      work(s, f, h) {
+        if (typeof s.id === "string") {
+          scopes.push(s.files);
+          if (s.id === "repair-2") return report("blocked", s.files);
+        }
+        h.put(s.files[0], `${h.events.length}`);
+        return report("completed", s.files);
+      },
+    });
+    await pauses(h, /external input/);
+    assert.deepEqual(scopes, [
+      ["a.mjs", "b.mjs"],
+      execution.version === 3 ? ["a.mjs", "b.mjs"] : ["a.mjs"],
+    ]);
+    assert.equal(h.goal.progress[2].status, "pending");
+    if (execution.version === 3) {
+      assert.equal(h.goal.execution.reachedSteps, 2);
+      delete h.goal.execution.reachedSteps;
+      await pauses(h, /external input/);
+      assert.equal(
+        h.goal.execution.reachedSteps,
+        2,
+        "derive scope from progress on continuation",
+      );
+      assert.equal(
+        h.goal.execution.repairs,
+        2,
+        "continuation stays in the existing round",
+      );
+    }
+  });
+}
+
+test("v3 preflight failure grants neither repair scope nor checkpoint budget", async () => {
+  const h = harness({ checks: [check("preflight", 0)], exec: () => output(1) });
+  await pauses(h, /No reached implementation files/);
+  assert.equal(h.goal.execution.reachedSteps, 0);
+  assert.deepEqual(h.goal.execution.repairsByCheckpoint, {});
+  assert.equal(h.goal.execution.pendingRepair, null);
+  assert.deepEqual(h.events, ["check:preflight"]);
 });
 
 test("completed journals still reject external drift rather than silently succeeding", async () => {

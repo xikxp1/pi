@@ -44,6 +44,7 @@ export async function runBoundedExecution({
   notify,
 }) {
   const policy = validateExecutionPolicy(goal.plan.execution);
+  const persistent = policy.version === 3;
   const token = approvalToken(goal);
   checkApproval();
   const initial = await snapshot();
@@ -68,6 +69,21 @@ export async function runBoundedExecution({
     pendingRepair: null,
     history: [],
   });
+  if (persistent) {
+    journal.repairsByCheckpoint ??= {};
+    // The cursor rewinds for revalidation, but already reached scope must not.
+    journal.reachedSteps = Math.max(
+      journal.reachedSteps ?? 0,
+      ...goal.plan.steps.map((step, index) =>
+        goal.progress.some(
+          (p) =>
+            p.id === step.id && ["in_progress", "completed"].includes(p.status),
+        )
+          ? index + 1
+          : 0,
+      ),
+    );
+  }
   const schedule = executionSchedule(goal.plan);
   const save = () => {
     checkApproval();
@@ -110,7 +126,14 @@ export async function runBoundedExecution({
         `Worker attempt limit (${policy.maxStepAttempts}) reached for ${step.title}.`,
       );
     journal.attempts[key] = (journal.attempts[key] ?? 0) + 1;
-    if (progress) progress.status = "in_progress";
+    if (progress) {
+      progress.status = "in_progress";
+      if (persistent)
+        journal.reachedSteps = Math.max(
+          journal.reachedSteps,
+          goal.plan.steps.findIndex((s) => s.id === step.id) + 1,
+        );
+    }
     save();
     announce(
       `Implementing ${step.title}, attempt ${journal.attempts[key]}${policy.maxStepAttempts === null ? " (progress-based continuation)" : `/${policy.maxStepAttempts}`}.`,
@@ -120,6 +143,15 @@ export async function runBoundedExecution({
       report = await work(
         step,
         `${feedback}\n\nPrevious result:\n${JSON.stringify(progress?.result ?? journal.pendingRepair?.result ?? null)}\n\nExecution evidence:\n${evidence()}`,
+        ...(persistent
+          ? [
+              {
+                workerKey: progress
+                  ? `step-${step.id}`
+                  : `repair:${journal.pendingRepair.checkpoint}`,
+              },
+            ]
+          : []),
       );
     } catch (error) {
       // Aborts and unsettled child ownership are not safe checkpoints. The
@@ -180,21 +212,32 @@ export async function runBoundedExecution({
     return false;
   }
 
-  function requestRepair(feedback, afterStep) {
+  function requestRepair(feedback, afterStep, checkpoint) {
     const files = [
-      ...new Set(goal.plan.steps.slice(0, afterStep).flatMap((s) => s.files)),
+      ...new Set(
+        goal.plan.steps
+          .slice(0, persistent ? journal.reachedSteps : afterStep)
+          .flatMap((s) => s.files),
+      ),
     ];
     if (!files.length)
       pause(
         `No reached implementation files are available for repair. ${feedback}`,
       );
-    if (journal.repairs >= policy.maxRepairAttempts)
-      pause(`Repair limit (${policy.maxRepairAttempts}) reached. ${feedback}`);
+    const used = persistent
+      ? (journal.repairsByCheckpoint[checkpoint] ?? 0)
+      : journal.repairs;
+    if (used >= policy.maxRepairAttempts)
+      pause(
+        `Repair limit (${policy.maxRepairAttempts}) reached${persistent ? ` for ${checkpoint}` : ""}. ${feedback}`,
+      );
     journal.repairs++;
+    if (persistent) journal.repairsByCheckpoint[checkpoint] = used + 1;
     journal.pendingRepair = {
+      ...(persistent ? { checkpoint } : {}),
       step: {
         id: `repair-${journal.repairs}`,
-        title: `Repair ${journal.repairs}/${policy.maxRepairAttempts}`,
+        title: `Repair ${persistent ? used + 1 : journal.repairs}/${policy.maxRepairAttempts}${persistent ? ` for ${checkpoint}` : ""}`,
         files,
         instructions:
           "Repair only defects identified by the supplied verification/review evidence within the approved acceptance criteria. Do not change the plan, commands, dependencies outside authorized files, or implement new scope. Preserve completed work. If a new user decision or command is needed, report blocked.",
@@ -268,7 +311,7 @@ export async function runBoundedExecution({
             pause(
               `${feedback}\nThis command is not approved for automatic reruns. /goal resume explicitly retries it.`,
             );
-          requestRepair(feedback, event.afterStep);
+          requestRepair(feedback, event.afterStep, `check-${event.index}`);
           continue;
         }
       }
@@ -301,6 +344,7 @@ export async function runBoundedExecution({
         requestRepair(
           `Independent review requires repair:\n${JSON.stringify(assessment)}`,
           goal.plan.steps.length,
+          "review",
         );
         continue;
       }

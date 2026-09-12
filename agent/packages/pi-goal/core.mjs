@@ -8,14 +8,24 @@ export const LEGACY_EXECUTION_POLICY = Object.freeze({
   maxRepairAttempts: 2,
   maxNoProgressAttempts: 2,
 });
-export const EXECUTION_POLICY = Object.freeze({
+export const V2_EXECUTION_POLICY = Object.freeze({
   version: 2,
   maxStepAttempts: null, // Productive continuations have no total attempt cap.
   maxRepairAttempts: 2,
   maxNoProgressAttempts: 2,
 });
+export const EXECUTION_POLICY = Object.freeze({
+  version: 3, // Persistent workers and repair budgets per stable checkpoint.
+  maxStepAttempts: null,
+  maxRepairAttempts: 2,
+  maxNoProgressAttempts: 2,
+});
 export function validateExecutionPolicy(value) {
-  const policy = [LEGACY_EXECUTION_POLICY, EXECUTION_POLICY].find(
+  const policy = [
+    LEGACY_EXECUTION_POLICY,
+    V2_EXECUTION_POLICY,
+    EXECUTION_POLICY,
+  ].find(
     (candidate) =>
       value &&
       Object.keys(value).length === Object.keys(candidate).length &&
@@ -493,7 +503,7 @@ export function renderProfiles(value) {
 export function renderPlan(state) {
   const p = state.plan;
   if (!p) return "No plan proposed yet.";
-  return `## ${p.title}\n\n${p.summary}\n\n### Acceptance criteria\n${p.acceptance.map((c) => `- ${c}`).join("\n")}\n\n### Constraints\n${p.constraints.map((c) => `- ${c}`).join("\n") || "- None specified"}\n\n### Steps\n${p.steps.map((s) => `${s.id}. **${s.title}**\n   Files: ${s.files.join(", ")}\n   ${s.instructions}`).join("\n\n")}\n\n### Verification (executed exactly as approved)\n${p.checks.map((c) => `- ${JSON.stringify(c.command)} (timeout ${c.timeout}s${p.execution ? `; ${c.afterStep === 0 ? "before implementation" : `after step ${c.afterStep ?? p.steps.length}`}; ${c.repeatable === true ? "automatic reruns authorized" : "one-shot, no automatic rerun"}` : ""})`).join("\n")}\n\n### Risks\n${p.risks.map((c) => `- ${c}`).join("\n") || "- None identified"}\n\n### Role profiles\n${renderProfiles(state.profiles)}\n\nOne writer at a time. Workers have read/edit/write tools, no shell or nested agents. Verification commands run in ${state.cwd}. No automatic commits or merges. ${p.execution ? `Approval includes ${p.execution.maxStepAttempts === null ? "progress-based continuation: no total worker attempt cap per step/repair while approved file snapshots keep changing (file changes are not proof of correctness and continued attempts consume tokens)" : `bounded continuation: up to ${p.execution.maxStepAttempts} worker attempts per step/repair`}, ${p.execution.maxRepairAttempts} repair rounds, and ${p.execution.maxNoProgressAttempts} consecutive no-file-progress continuation attempts before pausing. Repairs stay within files from reached steps; only commands marked repeatable may rerun automatically. /goal resume can continue an unchanged checkpoint without another approval and explicitly retries a failed one-shot command. New scope, commands, profiles or external file changes require fresh approval.` : "Review failure stops for your input; no automatic repair loop."}\n\n**Revision: ${approvalToken(state)}**\nUse /goal approve ${approvalToken(state)} to approve and start, or /goal revise <feedback>.`;
+  return `## ${p.title}\n\n${p.summary}\n\n### Acceptance criteria\n${p.acceptance.map((c) => `- ${c}`).join("\n")}\n\n### Constraints\n${p.constraints.map((c) => `- ${c}`).join("\n") || "- None specified"}\n\n### Steps\n${p.steps.map((s) => `${s.id}. **${s.title}**\n   Files: ${s.files.join(", ")}\n   ${s.instructions}`).join("\n\n")}\n\n### Verification (executed exactly as approved)\n${p.checks.map((c) => `- ${JSON.stringify(c.command)} (timeout ${c.timeout}s${p.execution ? `; ${c.afterStep === 0 ? "before implementation" : `after step ${c.afterStep ?? p.steps.length}`}; ${c.repeatable === true ? "automatic reruns authorized" : "one-shot, no automatic rerun"}` : ""})`).join("\n")}\n\n### Risks\n${p.risks.map((c) => `- ${c}`).join("\n") || "- None identified"}\n\n### Role profiles\n${renderProfiles(state.profiles)}\n\nOne writer at a time. Workers have read/edit/write tools, no shell or nested agents. Verification commands run in ${state.cwd}. No automatic commits or merges. ${p.execution ? `Approval includes ${p.execution.maxStepAttempts === null ? "progress-based continuation: no total worker attempt cap per step/repair while approved file snapshots keep changing (file changes are not proof of correctness and continued attempts consume tokens)" : `bounded continuation: up to ${p.execution.maxStepAttempts} worker attempts per step/repair`}, ${p.execution.maxRepairAttempts} repair rounds${p.execution.version === 3 ? " per checkpoint (each check and independent review; passing revalidation does not reset its budget), with persistent workers per step and per repair checkpoint across continuations and rounds" : ""}, and ${p.execution.maxNoProgressAttempts} consecutive no-file-progress continuation attempts before pausing. Repairs stay within files from reached steps; only commands marked repeatable may rerun automatically. /goal resume can continue an unchanged checkpoint without another approval and explicitly retries a failed one-shot command. New scope, commands, profiles or external file changes require fresh approval.` : "Review failure stops for your input; no automatic repair loop."}\n\n**Revision: ${approvalToken(state)}**\nUse /goal approve ${approvalToken(state)} to approve and start, or /goal revise <feedback>.`;
 }
 export function renderStepProgress(state, item) {
   const status =

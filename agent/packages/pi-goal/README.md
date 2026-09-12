@@ -4,7 +4,9 @@ Approval-first goals for Pi TUI and Zed through the local pi-acp fork. A goal in
 
 ## Start
 
-The package is enabled by `./packages/pi-goal` in `agent/settings.json`. Restart Pi or reconnect the Zed agent after installation. It requires the installed `@tintinweb/pi-subagents` protocol-v2 runtime; integration is tested against 0.19.0 and Pi 0.85.1.
+The package is enabled by `./packages/pi-goal` in `agent/settings.json`, after the local [`pi-subagents`](../pi-subagents/README.md) package. Integration targets Pi 0.85.1 and the local protocol-v2 runtime.
+
+Version-3 worker reuse is built into the local runtime (`goalResumeVersion: 1`); no vendor patch or npm subagents dependency is needed. Do not load both subagent runtimes. Once owned workers have settled, restart Pi or reconnect Zed to activate a package migration. A runtime missing managed resume refuses new version-3 execution rather than silently reverting to fresh workers. Existing goal approvals and v1/v2 policies remain unchanged.
 
 ```text
 /goal Add pagination to the search results
@@ -34,24 +36,24 @@ Profiles are saved in `$PI_CODING_AGENT_DIR/goal.json` (normally `~/.pi/agent/go
 
    Use the actual token from your plan. `/goal approve` without a token opens a confirmation containing the plan. Ordinary `yes`, `looks good`, or an assistant's statement never count as approval.
 
-5. Isolated implementers execute sequentially. Unfinished work returns `continue`, carrying retained edits and its previous report into the next worker without another approval. The coordinator runs exactly the approved commands at their checkpoints. Failed repeatable checks and review findings receive bounded in-scope repairs. An independent reviewer must return a passing assessment with evidence for every acceptance criterion before the goal completes.
+5. Isolated implementers execute sequentially. Version-3 plans retain worker context for unfinished steps and checkpoint repairs rather than starting a fresh conversation after each partial result. A new step starts a separate worker. Unfinished work continues without another approval. The coordinator runs exactly the approved commands at their checkpoints. Failed repeatable checks and review findings receive bounded in-scope repairs. An independent reviewer must return a passing assessment with evidence for every acceptance criterion before the goal completes.
 
 ### Progress-based continuation and command checkpoints
 
 New proposals include an explicit, approval-token-bound execution policy:
 
-- **No total worker-attempt cap per step or repair** in new version-2 policies. Productive unfinished work continues automatically, without repeated `/goal resume` requests. Each worker still has its configured turn limit; a fresh worker receives retained edits and the previous report.
+- **Version 3: persistent worker context with no total productive attempt cap per step or repair.** Productive unfinished work continues automatically, without repeated `/goal resume` requests. Each invocation still has its configured turn limit, using the runtime's existing wrap-up grace behavior. Workers are instructed to finish coherent implementations, not return after a small edit while they can still make progress. Continuations carry current scope and feedback instead of resending the full plan; they must not replay completed work. Session reuse is in-memory within one `goal_execute` operation, not across pauses, cancellation, reloads or approval changes. Independent review remains a fresh read-only worker.
 - Progress is measured by changes in approved file snapshots, not worker claims. **2 consecutive no-file-progress continuation attempts** pause execution; an observed file change resets this stall counter. Identical rewrites do not count. File changes do not prove useful progress or correctness: a worker that keeps changing files can keep consuming tokens until completion, a blocker, or cancellation. Use `/goal pause` to stop it.
-- **2 repair rounds** remain the limit. A productive repair may take more than four worker attempts within its round. Stall and repair-round counters reset only when the user explicitly requests `/goal resume`.
+- **2 repair rounds per failing checkpoint**, including a separate independent-review checkpoint. A repair at one checkpoint does not spend another checkpoint's budget. Passing a rerun does not erase its repair count, so alternating failures cannot reset budgets indefinitely. A productive partial repair remains in its current round. Stall and repair-round counters reset only when the user explicitly requests `/goal resume`.
 - `completed` means the delegated code-writing step is finished. `continue` means work remains without an external blocker. `blocked` means a concrete external prerequisite, new decision, or operation beyond approved scope is needed. Workers must not call themselves blocked just because tests are delegated to the coordinator.
 - Every check can specify `afterStep: 0` to run before any worker, or `afterStep: N` to run immediately after step N. Omission means after the final step. Checkpoints execute in ascending step order, preserving command order within each checkpoint.
 - `repeatable: true` explicitly authorizes automatic reruns. Build/test commands usually belong here. Setup, installation, deployment, and other potentially non-idempotent commands should normally use `false` (the default). Exact commands, checkpoints and repeat permissions appear in the proposal.
-- Repairs may edit only files belonging to reached steps and may not change the approved plan, acceptance criteria, commands or profiles. They receive actual failed-check/review evidence. Completed workers and successful one-shot commands are not replayed; previously passed repeatable checks are rerun after repairs.
+- Repairs may edit only files belonging to reached steps and may not change the approved plan, acceptance criteria, commands or profiles. Rewinding verification to an earlier checkpoint does not shrink repair scope: files of later steps already reached remain available, while genuinely unreached files remain excluded. They receive actual failed-check/review evidence. Completed workers and successful one-shot commands are not replayed; previously passed repeatable checks are rerun after repairs.
 - Failed one-shot commands stop without automatic repair or rerun. `/goal resume` explicitly retries the failed command; inspect its output and partial side effects first.
 - Consecutive stalls, repair-round limits, concrete blockers, and settled workers/reviewers missing usable output pause at an inspected checkpoint while retaining approval. Pauses include recorded worker progress and an evidence link; status and the widget label unfinished steps as paused rather than implying a worker is running. `/goal resume` continues unchanged authorized work, without another interview, plan or approval. File drift prevents this continuation.
 - Cancellation, uncertain worker settlement, session restoration, scope/profile changes and external changes still require inspection and fresh approval. Existing edits and evidence are preserved. No automatic commits, merges, arbitrary shell commands or scope expansion occur.
 
-**Existing plans are not silently upgraded.** Version-1 policies retain their approved four-attempt cap, and plans without an execution policy retain the original stop-on-failure behavior. Reload the extension only after owned work has settled. Then use `/goal revise Keep the implementation scope and retained edits; use progress-based continuation` once and approve the new proposal explicitly. Merely resuming or reapproving an old plan does not change its policy. Read-only research/planning incur model usage before implementation approval.
+**Existing plans are not silently upgraded.** Version-1 policies retain their approved four-attempt cap. Version-2 policies retain fresh-worker continuation and the overall two-repair budget. Plans without an execution policy retain the original stop-on-failure behavior. Reload the extension only after owned work has settled. Then use `/goal revise Keep the implementation scope and retained edits; use version-3 persistent workers and per-checkpoint repairs` once and approve the new proposal explicitly. Merely resuming or reapproving an old plan does not change its policy. Read-only research/planning incur model usage before implementation approval.
 
 ## Commands
 
@@ -112,7 +114,7 @@ npm test
 PI_GOAL_TEST_ACP=/absolute/path/to/pi-acp/dist/index.js npm test
 ```
 
-`PI_GOAL_TEST_PI` can override the Pi executable used by the RPC fixture. `PI_GOAL_TEST_SUBAGENTS` can point to another installed subagents entrypoint. Tests use isolated temporary configuration and a deterministic offline faux provider; they do not spend model credits or access live credentials.
+`PI_GOAL_TEST_PI` can override the Pi executable used by the RPC fixture. `PI_GOAL_TEST_SUBAGENTS` can point to another compatible subagents entrypoint. Tests use isolated temporary configuration and a deterministic offline faux provider; they do not spend model credits or access live credentials.
 
 Coverage includes state/profile/path validation, stale approval, branch restoration, parent tool gates, callback races, cancellation, model/thinking and child tool isolation, verification/review failure, real Pi RPC, and optional real pi-acp transport with an ACP client that has no elicitation capability. The ACP test covers both saved profiles and first-use selection, chat answers, explicit-token/confirmation approval, and native child cards.
 

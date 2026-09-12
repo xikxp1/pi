@@ -18,12 +18,7 @@ const acp = process.env.PI_GOAL_TEST_ACP;
 const root = fileURLToPath(new URL("../", import.meta.url));
 const subagents =
   process.env.PI_GOAL_TEST_SUBAGENTS ??
-  fileURLToPath(
-    new URL(
-      "../../../npm/node_modules/@tintinweb/pi-subagents/src/index.ts",
-      import.meta.url,
-    ),
-  );
+  fileURLToPath(new URL("../../pi-subagents/index.ts", import.meta.url));
 const bridge = fileURLToPath(
   new URL("../../../extensions/pi-acp-subagents.ts", import.meta.url),
 );

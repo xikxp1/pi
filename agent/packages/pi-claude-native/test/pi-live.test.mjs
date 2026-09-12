@@ -87,7 +87,7 @@ test(
 );
 
 test(
-  "live Pi: existing pi-subagents executes a native Claude child with Pi read tool",
+  "live Pi: local pi-subagents executes a native Claude child with Pi read tool",
   { skip: !live, timeout: 150000 },
   async () => {
     const e = await environment();
@@ -110,12 +110,7 @@ test(
       await writeFile(join(e.dir, "probe.txt"), "SUBAGENT_NATIVE_PASSED_6731");
       const subagents =
         process.env.PI_SUBAGENTS_EXTENSION ??
-        fileURLToPath(
-          new URL(
-            "../../../npm/node_modules/@tintinweb/pi-subagents/src/index.ts",
-            import.meta.url,
-          ),
-        );
+        fileURLToPath(new URL("../../pi-subagents/index.ts", import.meta.url));
       const r = await exec(
         "pi",
         [

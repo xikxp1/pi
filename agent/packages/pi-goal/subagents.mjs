@@ -21,20 +21,23 @@ export class SubagentClient {
   #timeoutMs;
   #onActivity;
   #getRecord;
+  #getManager;
+  #resumable = new Map();
   #active;
   #disposed = false;
   #cleanups = new Set();
 
   constructor(
     events,
-    { timeoutMs = 5000, onActivity = () => {}, getRecord } = {},
+    { timeoutMs = 5000, onActivity = () => {}, getRecord, getManager } = {},
   ) {
     this.#events = events;
     this.#timeoutMs = timeoutMs;
     this.#onActivity = onActivity;
+    this.#getManager =
+      getManager ?? (() => globalThis[Symbol.for("pi-subagents:manager")]);
     this.#getRecord =
-      getRecord ??
-      ((id) => globalThis[Symbol.for("pi-subagents:manager")]?.getRecord?.(id));
+      getRecord ?? ((id) => this.#getManager()?.getRecord?.(id));
   }
 
   #record(id) {
@@ -124,6 +127,23 @@ export class SubagentClient {
     return 2;
   }
 
+  assertResumeSupport() {
+    const manager = this.#getManager();
+    if (
+      manager?.goalResumeVersion !== 1 ||
+      typeof manager.resume !== "function"
+    )
+      throw new Error(
+        "Persistent goal workers require the local pi-subagents package with managed resume support. Enable ./packages/pi-subagents in agent/settings.json, then restart Pi after owned workers settle.",
+      );
+    return manager;
+  }
+
+  /** Drop reuse authority, not live ownership. Never stop an unrelated worker. */
+  forgetContinuations() {
+    this.#resumable.clear();
+  }
+
   run({
     type,
     prompt,
@@ -134,18 +154,47 @@ export class SubagentClient {
     structuredOutput,
     cwd,
     onSpawned,
+    persistent = false,
+    resumeId,
   }) {
     if (this.#disposed)
       return Promise.reject(new Error("SubagentClient is disposed"));
     if (this.#active)
       return Promise.reject(new Error("A subagent run is still unsettled"));
     if (signal?.aborted) return Promise.reject(abortError());
+    let manager, retained;
+    if (persistent || resumeId) {
+      try {
+        manager = this.assertResumeSupport();
+        if (resumeId) {
+          retained = this.#resumable.get(resumeId);
+          const record = this.#record(resumeId);
+          if (
+            !retained ||
+            !record?.session ||
+            record.session !== retained.session ||
+            !["completed", "steered"].includes(record.status) ||
+            record.session.isStreaming ||
+            JSON.stringify([type, model, thinkingLevel, maxTurns, cwd]) !==
+              retained.profile ||
+            structuredOutput !== retained.structuredOutput
+          )
+            throw new Error(
+              "Cannot resume a missing, changed, active or unowned goal worker",
+            );
+          this.#resumable.delete(resumeId);
+        }
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     const state = {
       type,
       controller: new AbortController(),
       id: undefined,
       terminal: false,
       cancelled: false,
+      invocationId: resumeId ? randomUUID() : undefined,
     };
     this.#active = state;
     const promise = new Promise((resolve, reject) => {
@@ -206,6 +255,9 @@ export class SubagentClient {
       };
       const settled = (raw) => {
         if (!state.id || raw?.id !== state.id || state.terminal) return;
+        // A resumed worker keeps its id. Only this invocation's correlated
+        // terminal event can release ownership, never an older completion.
+        if (resumeId && raw.goalInvocationId !== state.invocationId) return;
         // Must happen inside the lifecycle emit, before pi-subagents checks nudges.
         this.#send("consume", state.id);
         const event = {
@@ -219,7 +271,9 @@ export class SubagentClient {
         release();
         this.#notify(this.#onActivity, { event: "settled", ...event });
         let error;
-        if (event.status !== "completed" || event.error) {
+        const softHandoff =
+          persistent && structuredOutput && event.status === "steered";
+        if ((event.status !== "completed" && !softHandoff) || event.error) {
           error = new Error(
             event.error || `Subagent ended with status ${event.status}`,
           );
@@ -230,6 +284,21 @@ export class SubagentClient {
         ) {
           error = new Error("Subagent returned an empty result");
         }
+        if (!error && persistent && !state.cancelled && !this.#disposed) {
+          const session = this.#record(state.id)?.session;
+          if (session)
+            this.#resumable.set(state.id, {
+              session,
+              profile: JSON.stringify([
+                type,
+                model,
+                thinkingLevel,
+                maxTurns,
+                cwd,
+              ]),
+              structuredOutput,
+            });
+        }
         if (error) error.event = event;
         answer(error, event);
       };
@@ -237,6 +306,75 @@ export class SubagentClient {
         this.#listen("subagents:completed", settled),
         this.#listen("subagents:failed", settled),
       );
+      if (resumeId) {
+        // Register ownership/listeners before dispatch: resume may start and
+        // finish synchronously. The previous terminal emit has already returned
+        // because callers await the preceding run's promise.
+        signal?.addEventListener("abort", aborted, { once: true });
+        own(resumeId);
+        // Observers can synchronously abort while ownership is announced.
+        // No new work has been dispatched yet, so releasing here is safe.
+        if (signal?.aborted && !state.cancelled) aborted();
+        if (state.cancelled) {
+          release();
+          return;
+        }
+        timer = setTimeout(
+          () => cancel(timeoutError("resume")),
+          this.#timeoutMs,
+        );
+        try {
+          const pending = manager.resume(resumeId, prompt, {
+            invocationId: state.invocationId,
+            signal: state.controller.signal,
+            maxTurns,
+            onStarted: (session) => {
+              if (session !== retained.session) {
+                cancel(new Error("Resumed worker session identity changed"));
+                return;
+              }
+              // onStarted precedes the runner's abort listener. Defer a repeat
+              // stop to the microtask boundary if cancellation won that race.
+              if (state.cancelled)
+                queueMicrotask(() => {
+                  if (!state.terminal) this.#send("stop", resumeId);
+                });
+            },
+          });
+          Promise.resolve(pending).then(
+            (record) => {
+              clearTimeout(timer);
+              if (state.terminal) return;
+              if (!record || record.id !== resumeId) {
+                // A documented refusal is safe only if the original idle session
+                // is still unchanged; otherwise keep ownership until settlement.
+                if (
+                  !record &&
+                  this.#record(resumeId)?.session === retained.session &&
+                  ["completed", "steered"].includes(
+                    this.#record(resumeId)?.status,
+                  ) &&
+                  !retained.session.isStreaming
+                ) {
+                  release();
+                  answer(
+                    new Error("Subagent runtime refused worker continuation"),
+                  );
+                } else
+                  cancel(
+                    new Error(
+                      "Subagent runtime did not acknowledge the owned continuation",
+                    ),
+                  );
+              }
+            },
+            (error) => cancel(error),
+          );
+        } catch (error) {
+          cancel(error);
+        }
+        return;
+      }
       const requestId = randomUUID();
       replyOff = this.#listen(
         `subagents:rpc:spawn:reply:${requestId}`,
@@ -295,6 +433,7 @@ export class SubagentClient {
   async dispose() {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.forgetContinuations();
     await this.stop();
     for (const cleanup of [...this.#cleanups]) cleanup();
   }

@@ -45,7 +45,18 @@ export default function (pi: ExtensionAPI) {
     const role =
       /<active_agent name="(PiGoal\w+)"/.exec(context.systemPrompt)?.[1] ??
       "parent";
-    const tools = context.messages.filter((m: any) => m.role === "toolResult");
+    const lastUserIndex = context.messages.findLastIndex(
+      (m: any) => m.role === "user",
+    );
+    // Resumed workers retain earlier tool calls. Script this invocation only,
+    // while logging retained history so the integration test proves real reuse.
+    const invocationMessages =
+      role === "PiGoalImplementer"
+        ? context.messages.slice(lastUserIndex + 1)
+        : context.messages;
+    const tools = invocationMessages.filter(
+      (m: any) => m.role === "toolResult",
+    );
     const has = (name: string) => tools.some((m: any) => m.toolName === name);
     const last = context.messages.at(-1);
     const userText = context.messages
@@ -70,6 +81,12 @@ export default function (pi: ExtensionAPI) {
             "Retained partial greeting needs completion",
           ),
           tools: context.tools?.map((t: any) => t.name),
+          priorStructuredOutputs: context.messages
+            .slice(0, lastUserIndex)
+            .filter(
+              (m: any) =>
+                m.role === "toolResult" && m.toolName === "StructuredOutput",
+            ).length,
         }) + "\n",
       );
     const call = (name: string, args: any) =>

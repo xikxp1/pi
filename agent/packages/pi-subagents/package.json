@@ -1,0 +1,19 @@
+{
+  "name": "pi-subagents-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Small local Pi delegation and workflow runtime with native goal continuations",
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "acorn": "8.18.0", "ajv": "8.20.0", "yaml": "2.9.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "typebox": { "optional": true }
+  }
+}

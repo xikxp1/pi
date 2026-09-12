@@ -4,6 +4,7 @@ import {
   STATE_TYPE,
   EXECUTION_POLICY,
   LEGACY_EXECUTION_POLICY,
+  V2_EXECUTION_POLICY,
   ROLES,
   THINKING,
   READ_TOOLS,
@@ -145,7 +146,12 @@ test("proposal renders checkpoint order, repeat permissions and progress-based c
   assert.match(output, /no total worker attempt cap/);
   assert.match(output, /continued attempts consume tokens/);
   assert.match(output, /2 consecutive no-file-progress continuation attempts/);
-  assert.match(output, /2 repair rounds/);
+  assert.match(output, /2 repair rounds per checkpoint/);
+  assert.match(output, /persistent workers per step and per repair checkpoint/);
+  assert.match(output, /passing revalidation does not reset its budget/);
+  s.plan.execution = { ...V2_EXECUTION_POLICY };
+  assert.match(renderPlan(s), /no total worker attempt cap/);
+  assert.doesNotMatch(renderPlan(s), /per checkpoint|persistent workers/);
   assert.doesNotMatch(output, /up to 4 worker attempts/);
   s.plan.execution = { ...LEGACY_EXECUTION_POLICY };
   assert.match(renderPlan(s), /up to 4 worker attempts/);
@@ -171,11 +177,47 @@ test("versioned policies preserve old authority and require new approval to remo
     { ...EXECUTION_POLICY, maxStepAttempts: 4 },
     { ...EXECUTION_POLICY, maxNoProgressAttempts: 0 },
     { ...EXECUTION_POLICY, maxRepairAttempts: 3 },
-    { ...EXECUTION_POLICY, version: 3 },
+    { ...EXECUTION_POLICY, version: 4 },
     { version: 2, maxRepairAttempts: 2, maxNoProgressAttempts: 2 },
     null,
   ])
     assert.throws(() => validatePlan({ ...plan(), execution }), /Unsupported/);
+});
+
+test("v2 policy remains exact and v3 requires fresh approval", () => {
+  assert.equal(EXECUTION_POLICY.version, 3);
+  for (const execution of [
+    LEGACY_EXECUTION_POLICY,
+    V2_EXECUTION_POLICY,
+    EXECUTION_POLICY,
+  ]) {
+    assert.deepEqual(
+      validatePlan({ ...plan(), execution }).execution,
+      execution,
+    );
+    for (const invalid of [
+      { ...execution, extra: true },
+      { ...execution, maxRepairAttempts: 1 },
+      { ...execution, maxNoProgressAttempts: 3 },
+      { ...execution, maxStepAttempts: 5 },
+    ])
+      assert.throws(
+        () => validatePlan({ ...plan(), execution: invalid }),
+        /Unsupported/,
+      );
+  }
+  const s = proposed();
+  s.plan.execution = { ...V2_EXECUTION_POLICY };
+  const token = approvalToken(s);
+  approve(s, token);
+  assert.equal(approvalToken({ ...s, plan: validatePlan(s.plan) }), token);
+  assert.deepEqual(
+    restore([entry(s)], cwd).plan.execution,
+    V2_EXECUTION_POLICY,
+  );
+  s.plan.execution = { ...EXECUTION_POLICY };
+  assert.notEqual(approvalToken(s), token);
+  assert.equal(isApproved(s), false);
 });
 
 test("paused status distinguishes unfinished work from active workers and includes observed progress", () => {

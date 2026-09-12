@@ -90,11 +90,13 @@ async function fixture(
     async ping() {
       return 2;
     },
+    assertResumeSupport() {},
+    forgetContinuations() {},
     async stop() {},
     async dispose() {},
     async run(request) {
       spawns.push(request);
-      const id = `child-${++number}`;
+      const id = request.resumeId ?? `child-${++number}`;
       request.onSpawned(id);
       if (runOverride) {
         const outcome = await runOverride(request, id);
@@ -580,6 +582,14 @@ test("partial work continues under one approval without another research/plannin
   });
   await f.call("goal_execute");
   assert.equal(calls, 2);
+  const workers = f.spawns.filter((r) => r.type.endsWith("Implementer"));
+  assert.equal(workers[0].persistent, true);
+  assert.equal(workers[0].resumeId, undefined);
+  assert.equal(workers[1].resumeId, "child-3");
+  assert.equal(workers[0].structuredOutput, workers[1].structuredOutput);
+  assert.match(workers[1].prompt, /retained worker context/);
+  assert.doesNotMatch(workers[1].prompt, /Feature \(user wording\)/);
+  assert.match(workers[0].prompt, /Do not return continue after a tiny edit/);
   assert.equal(f.controller.getState().phase, "completed");
   assert.equal(f.spawns.filter((r) => r.type.endsWith("Planner")).length, 1);
 });
@@ -587,7 +597,7 @@ test("partial work continues under one approval without another research/plannin
 test("productive workers continue beyond four attempts through checks and review without resume", async (t) => {
   const f = await fixture(t);
   await f.readyPlan();
-  assert.equal(f.controller.getState().plan.execution.version, 2);
+  assert.equal(f.controller.getState().plan.execution.version, 3);
   const token = approvalToken(f.controller.getState());
   await f.command(`approve ${token}`);
   let attempts = 0;
@@ -943,6 +953,129 @@ test("restoring even a safely paused new checkpoint never restores executable ap
   assert.equal(f.controller.getState().approval, null);
   await f.command("resume");
   assert.equal(f.controller.getState().phase, "awaiting_approval");
+});
+
+test("a resumed worker must submit fresh output instead of reusing its previous valid report", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const token = approvalToken(f.controller.getState());
+  await f.command(`approve ${token}`);
+  let calls = 0;
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Implementer")) return;
+    calls++;
+    if (calls === 1) {
+      await writeFile(join(f.cwd, "greeting.txt"), "partial");
+      return {
+        id,
+        status: "completed",
+        result: JSON.stringify({
+          status: "continue",
+          summary: "Finish retained greeting",
+          files: ["greeting.txt"],
+        }),
+      };
+    }
+    assert.equal(request.resumeId, "child-3");
+    return { id, status: "completed", result: "{}" };
+  });
+  await assert.rejects(f.call("goal_execute"), /valid StructuredOutput/);
+  assert.equal(calls, 2);
+  assert.equal(f.controller.getState().phase, "paused");
+  assert.equal(f.controller.getState().approval, token);
+  assert.equal(f.execs.length, 0);
+  assert.equal(
+    f.controller.getState().execution.history.at(-1).error,
+    "implementer did not submit valid StructuredOutput",
+  );
+  f.setRun(undefined);
+  await f.command("resume");
+  await f.call("goal_execute");
+  const lastWorker = f.spawns
+    .filter((r) => r.type.endsWith("Implementer"))
+    .at(-1);
+  assert.equal(
+    lastWorker.resumeId,
+    undefined,
+    "paused handles must not survive a new execution operation",
+  );
+});
+
+test("checkpoint repair rounds share a worker but have fresh output validation", async (t) => {
+  const f = await fixture(t, {
+    proposal: {
+      ...plan,
+      checks: [{ ...plan.checks[0], afterStep: 1, repeatable: true }],
+    },
+  });
+  await f.readyPlan();
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  let checks = 0;
+  f.setExec(() => ({
+    code: ++checks <= 2 ? 1 : 0,
+    killed: false,
+    stdout: "diagnostic",
+    stderr: "",
+  }));
+  await f.call("goal_execute");
+  const workers = f.spawns.filter((r) => r.type.endsWith("Implementer"));
+  assert.equal(workers.length, 3);
+  assert.equal(workers[0].resumeId, undefined);
+  assert.equal(
+    workers[1].resumeId,
+    undefined,
+    "repair starts at its own scope boundary",
+  );
+  assert.equal(workers[2].resumeId, "child-4");
+  assert.equal(workers[1].structuredOutput, workers[2].structuredOutput);
+  assert.match(workers[2].prompt, /"id":"repair-2"/);
+  assert.equal(
+    f.controller.getState().execution.repairsByCheckpoint["check-0"],
+    2,
+  );
+});
+
+test("version-2 restored plans keep fresh workers and do not require managed resume", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const old = f.controller.getState();
+  old.plan.execution.version = 2;
+  f.entries.splice(0, f.entries.length, {
+    type: "custom",
+    customType: STATE_TYPE,
+    data: old,
+  });
+  await f.fire("session_tree");
+  f.fakeClient.assertResumeSupport = () => {
+    throw new Error("unsupported");
+  };
+  await f.command(`approve ${approvalToken(f.controller.getState())}`);
+  let calls = 0;
+  f.setRun(async (request, id) => {
+    if (!request.type.endsWith("Implementer") || ++calls > 1) return;
+    await writeFile(join(f.cwd, "greeting.txt"), "partial");
+    return {
+      id,
+      status: "completed",
+      result: JSON.stringify({
+        status: "continue",
+        summary: "Finish greeting",
+        files: ["greeting.txt"],
+      }),
+    };
+  });
+  await f.call("goal_execute");
+  const workers = f.spawns.filter((r) => r.type.endsWith("Implementer"));
+  assert.equal(workers.length, 2);
+  assert.ok(workers.every((r) => !r.persistent && !r.resumeId));
+});
+
+test("new planner prompt describes actual v3 policy instead of obsolete attempt limits", async (t) => {
+  const f = await fixture(t);
+  await f.readyPlan();
+  const prompt = f.spawns.find((r) => r.type.endsWith("Planner")).prompt;
+  assert.match(prompt, /two repair rounds per failing checkpoint/);
+  assert.doesNotMatch(prompt, /four worker attempts/);
 });
 
 test("stale approval cannot invalidate cancellation even when snapshot reports changed files", async (t) => {

@@ -321,6 +321,7 @@ export function installGoal(pi, deps) {
       signal?.removeEventListener("abort", abort);
       if (operation === controller) operation = null;
       busy = false;
+      client?.forgetContinuations?.();
       if (state === goal && runtimeActive) {
         if (!client?.hasUnsettled) goal.worker = null;
         persist(ctx);
@@ -337,6 +338,7 @@ export function installGoal(pi, deps) {
     current,
     structuredOutput,
     onUpdate,
+    continuation,
   ) {
     current();
     const p = availableProfile(goal.profiles[role], ctx);
@@ -347,21 +349,28 @@ export function installGoal(pi, deps) {
     persist(ctx);
     onUpdate?.(
       toolResult(
-        `Running ${role}: ${p.model}, ${p.thinking} thinking (up to ${p.maxTurns} turns)`,
+        `${continuation?.id ? "Resuming" : "Running"} ${role}${continuation?.id ? ` (${continuation.id})` : ""}: ${p.model}, ${p.thinking} thinking (up to ${p.maxTurns} turns)`,
       ),
     );
     // The bus event carries final prose, not record.structuredJson. Capture
     // validated tool output in-process instead of parsing untrusted final prose.
     let capturedJson;
+    const validateOutput = (value) => {
+      current();
+      const verdict = structuredOutput.check(value);
+      if (verdict === true) capturedJson = JSON.stringify(value);
+      return verdict;
+    };
+    // A resumed session retains its original StructuredOutput tool. Dispatch
+    // through a stable object to this invocation's validator and capture only.
+    if (continuation) continuation.validate = validateOutput;
     const capture = structuredOutput
-      ? {
-          schema: structuredOutput.schema,
-          check(value) {
-            const verdict = structuredOutput.check(value);
-            if (verdict === true) capturedJson = JSON.stringify(value);
-            return verdict;
-          },
-        }
+      ? continuation
+        ? (continuation.capture ??= {
+            schema: structuredOutput.schema,
+            check: (value) => continuation.validate(value),
+          })
+        : { schema: structuredOutput.schema, check: validateOutput }
       : undefined;
     let outcome;
     try {
@@ -374,7 +383,11 @@ export function installGoal(pi, deps) {
         cwd: ctx.cwd,
         signal,
         structuredOutput: capture,
+        ...(continuation
+          ? { persistent: true, resumeId: continuation.id }
+          : {}),
         onSpawned(id) {
+          if (continuation) continuation.id = id;
           if (state === goal && runtimeActive) {
             goal.worker = { role, id };
             persist(ctx);
@@ -382,6 +395,10 @@ export function installGoal(pi, deps) {
         },
       });
     } catch (error) {
+      if (continuation) {
+        continuation.id = undefined;
+        continuation.validate = () => "Worker invocation is no longer active";
+      }
       current();
       error.artifact = await record(ctx, goal, role, {
         ...(error.event ?? {}),
@@ -396,8 +413,11 @@ export function installGoal(pi, deps) {
       throw error;
     }
     current();
+    if (continuation)
+      continuation.validate = () => "Worker invocation is no longer active";
     if (structuredOutput) {
       if (capturedJson === undefined) {
+        if (continuation) continuation.id = undefined;
         const error = new Error(
           `${role} did not submit valid StructuredOutput`,
         );
@@ -421,6 +441,10 @@ export function installGoal(pi, deps) {
 
   async function executeBounded(ctx, goal, signal, current, onUpdate) {
     const token = approvalToken(goal);
+    // In-memory only and confined to this approved execution. Never resurrect
+    // child handles across pauses, cancellation, reloads or approval changes.
+    const continuations = new Map();
+    if (goal.plan.execution.version === 3) client.assertResumeSupport();
     const checkApproval = () => {
       current();
       if (!isApproved(goal) || approvalToken(goal) !== token)
@@ -443,16 +467,31 @@ export function installGoal(pi, deps) {
           signal,
           timeout: check.timeout * 1000,
         }),
-      work: async (step, feedback) => {
+      work: async (step, feedback, metadata) => {
+        let continuation;
+        if (goal.plan.execution.version === 3 && metadata?.workerKey) {
+          continuation = continuations.get(metadata.workerKey);
+          if (!continuation) {
+            continuation = {};
+            continuations.set(metadata.workerKey, continuation);
+          }
+        }
+        const prefix = continuation?.id
+          ? `Continue in your retained worker context under unchanged approval ${token}. The current delegation below supersedes earlier step/repair file scopes. Preserve retained edits; do not repeat completed work.`
+          : `${contextFor(goal)}\n\nAPPROVED PLAN revision ${token}:\n${JSON.stringify(goal.plan)}`;
+        const lifetime = continuation
+          ? ` Work through a coherent implementation using the available ${goal.profiles.implementer.maxTurns}-turn budget. Do not return continue after a tiny edit while you can still advance the delegated work. Reserve your final turns for an exact progress report when the budget is nearly exhausted. Completion and genuine external blockers may be reported immediately.`
+          : "";
         const result = await child(
           ctx,
           goal,
           "implementer",
-          `${contextFor(goal)}\n\nAPPROVED PLAN revision ${token}:\n${JSON.stringify(goal.plan)}\n\nImplement ONLY this delegated step or in-scope repair:\n${JSON.stringify(step)}\n\nCompleted steps:\n${JSON.stringify(goal.progress.filter((p) => p.status === "completed"))}\n\n${feedback}\n\nFinish real code rather than stopping after research. Inspect retained edits and complete the missing work. Report status completed when this step's code is finished; tests run at the coordinator's approved checkpoints, so not having run tests yourself is NOT a blocker. If code remains unfinished, use status continue with exact remaining tasks, never blocked merely because this invocation is unfinished. Use blocked ONLY for a concrete external dependency, a new consequential user decision, or an operation outside approved scope. Do not run shell commands, tests, commits or delegation. Return exact changed files through StructuredOutput.`,
+          `${prefix}\n\nImplement ONLY this delegated step or in-scope repair:\n${JSON.stringify(step)}\n\nCompleted steps:\n${JSON.stringify(goal.progress.filter((p) => p.status === "completed"))}\n\n${feedback}\n\nFinish real code rather than stopping after research. Inspect retained edits and complete the missing work. Report status completed when this step's code is finished; tests run at the coordinator's approved checkpoints, so not having run tests yourself is NOT a blocker. If code remains unfinished, use status continue with exact remaining tasks, never blocked merely because this invocation is unfinished. Use blocked ONLY for a concrete external dependency, a new consequential user decision, or an operation outside approved scope. Do not run shell commands, tests, commits or delegation. Return exact changed files through StructuredOutput.${lifetime}`,
           signal,
           current,
           compiled(WORK_SCHEMA, (value) => validateWork(value, step)),
           onUpdate,
+          continuation,
         );
         checkApproval();
         return {
@@ -640,6 +679,8 @@ export function installGoal(pi, deps) {
             journal.attempts = {};
             journal.noProgress = {};
             journal.repairs = 0;
+            if (goal.plan.execution.version === 3)
+              journal.repairsByCheckpoint = {};
             goal.phase = "approved";
             goal.reason = null;
             persist(ctx);
@@ -669,6 +710,8 @@ export function installGoal(pi, deps) {
             journal.attempts = {};
             journal.noProgress = {};
             journal.repairs = 0;
+            if (goal.plan.execution.version === 3)
+              journal.repairsByCheckpoint = {};
             journal.passed = journal.passed.filter(
               (i) => goal.plan.checks[i].repeatable !== true,
             );
@@ -938,7 +981,7 @@ export function installGoal(pi, deps) {
           ctx,
           goal,
           "planner",
-          `${contextFor(goal)}\n\nPlanning focus:\n${params.focus ? text(params.focus, "Planning focus", 6000) : "Implement the clarified feature."}\n\nPrevious plan (if revising):\n${JSON.stringify(goal.plan)}\n\nPrevious execution evidence (preserve completed edits and diagnose the actual failure):\n${JSON.stringify({ reason: goal.reason, progress: goal.progress, checks: goal.checks, review: goal.review, execution: goal.execution })}\n\nCreate a plan that delivers the user's feature, not a preparation-only substitute. Use small code-writing steps with precise file ownership and independently testable acceptance criteria. Every step runs sequentially with an edit-only implementer. The coordinator runs each exact command at its afterStep checkpoint: 0 BEFORE any worker, or N immediately AFTER step N. Put Git/dependency/generation prerequisites before the workers that need them, and build/test checks incrementally rather than only at the end. Set repeatable:true ONLY for commands whose side effects the user can safely authorize to repeat during repairs; setup/install/deployment commands should normally be repeatable:false. Omitted afterStep means after the last step; omitted repeatable means no automatic rerun. The coordinator attaches a visible, token-bound bounded continuation policy (four worker attempts per step, two repair rounds, two consecutive no-progress attempts). Repairs are limited to files of reached steps; include necessary generated/lock files among declared targets. Do not require a new approval merely for unfinished in-scope work. Follow the StructuredOutput schema. Unresolved consequential decisions must be listed as risks, not silently assumed. The user will review the entire plan before any implementation.`,
+          `${contextFor(goal)}\n\nPlanning focus:\n${params.focus ? text(params.focus, "Planning focus", 6000) : "Implement the clarified feature."}\n\nPrevious plan (if revising):\n${JSON.stringify(goal.plan)}\n\nPrevious execution evidence (preserve completed edits and diagnose the actual failure):\n${JSON.stringify({ reason: goal.reason, progress: goal.progress, checks: goal.checks, review: goal.review, execution: goal.execution })}\n\nCreate a plan that delivers the user's feature, not a preparation-only substitute. Use small code-writing steps with precise file ownership and independently testable acceptance criteria. Every step runs sequentially with an edit-only implementer. The coordinator runs each exact command at its afterStep checkpoint: 0 BEFORE any worker, or N immediately AFTER step N. Put Git/dependency/generation prerequisites before the workers that need them, and build/test checks incrementally rather than only at the end. Set repeatable:true ONLY for commands whose side effects the user can safely authorize to repeat during repairs; setup/install/deployment commands should normally be repeatable:false. Omitted afterStep means after the last step; omitted repeatable means no automatic rerun. The coordinator attaches a visible, token-bound version-3 continuation policy: reuse worker context for unfinished steps and checkpoint repairs, no total productive attempt cap, two repair rounds per failing checkpoint (including independent review), and two consecutive no-file-progress attempts before pausing. A successful rerun does not erase that checkpoint's repair count. Workers should complete coherent implementations rather than hand off after tiny edits. Repairs are limited to files of reached steps; include necessary generated/lock files among declared targets. Do not require a new approval merely for unfinished in-scope work. Follow the StructuredOutput schema. Unresolved consequential decisions must be listed as risks, not silently assumed. The user will review the entire plan before any implementation.`,
           childSignal,
           current,
           compiled(PLAN_SCHEMA, (value) =>
@@ -979,7 +1022,7 @@ export function installGoal(pi, deps) {
     name: "goal_execute",
     label: "Execute approved goal",
     description:
-      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. New approved plans continue productive in-scope work without a total worker attempt cap, with bounded repair rounds and explicit command checkpoints. Pauses for consecutive no-file-progress attempts, external blockers, safety violations, or cancellation. Older policies retain their approved limits. Never commits or grants new authority.",
+      "Execute ONLY the user-approved current goal revision. Runs sequential implementation subagents, exact approved verification commands, and independent read-only review. Cannot approve itself; no arbitrary task/model arguments are accepted. New approved plans reuse worker context for productive in-scope continuations, with no total attempt cap, two repair rounds per failing checkpoint, and exact command checkpoints. Pauses for consecutive no-file-progress attempts, external blockers, safety violations, or cancellation. Older policies retain their approved limits. Never commits or grants new authority.",
     parameters: parameters({}),
     async execute(_id, params, signal, onUpdate, ctx) {
       if (Object.keys(params).length)
