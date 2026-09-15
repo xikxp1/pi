@@ -8,6 +8,7 @@
     "npm:@ff-labs/pi-fff",
     "npm:pi-ask-user",
     "./packages/pi-claude-native",
+    "./packages/pi-subagents",
     "npm:pi-web-access",
     "git:github.com/NVlabs/SoL-Pi"
   ],

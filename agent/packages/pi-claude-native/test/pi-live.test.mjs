@@ -92,21 +92,6 @@ test(
   async () => {
     const e = await environment();
     try {
-      const agents = join(e.agentDir, "agents");
-      await mkdir(agents);
-      await writeFile(
-        join(agents, "NativeProbe.md"),
-        "---\nname: NativeProbe\ndescription: Read a test file\nmodel: claude-native/claude-haiku-4-5\ntools: read\nskills: false\npersist_session: false\noutput_transcript: false\nmax_turns: 3\n---\nRead the requested file using the Pi read tool and return its contents verbatim. Do not perform any other work.\n",
-      );
-      await writeFile(
-        join(e.agentDir, "subagents.json"),
-        JSON.stringify({
-          rememberAgents: false,
-          outputTranscript: false,
-          workflowsEnabled: false,
-          schedulingEnabled: false,
-        }),
-      );
       await writeFile(join(e.dir, "probe.txt"), "SUBAGENT_NATIVE_PASSED_6731");
       const subagents =
         process.env.PI_SUBAGENTS_EXTENSION ??
@@ -118,9 +103,9 @@ test(
           "-e",
           subagents,
           "--tools",
-          "Agent",
+          "subagent,read",
           "-p",
-          `Call the Agent tool exactly once using subagent_type NativeProbe, description "Read native test fixture", run_in_background false, and prompt "Read ${join(e.dir, "probe.txt")} using the read tool and return the contents verbatim." Then report the subagent's answer. Do not use any workflow.`,
+          `Call the subagent tool exactly once with description "Read native test fixture", timeout 110, and task "Read ${join(e.dir, "probe.txt")} using the read tool and return the contents verbatim." Do not read the file yourself. Then report the subagent's answer.`,
         ],
         { cwd: e.dir, env: e.env, timeout: 130000, maxBuffer: 4e6 },
       );
