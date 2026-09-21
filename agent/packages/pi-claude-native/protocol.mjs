@@ -47,6 +47,55 @@ export function systemPrompt(prompt, tools = []) {
   );
 }
 
+/** Project Pi's normalized transcript (or legacy Context) into CLI request fields.
+ * Replay section/tool deltas like pi-ai's getCurrentSystemPrompt/getCurrentTools;
+ * Claude Code takes one current system prompt, not inline system messages. */
+export function requestPayload(context) {
+  const parts = [];
+  const sections = new Map();
+  const tools = new Map();
+  const messages = [];
+  if (context.systemPrompt !== undefined) {
+    if (typeof context.systemPrompt !== "string")
+      throw new Error("Expected a string systemPrompt");
+    if (context.systemPrompt) parts.push(context.systemPrompt);
+  }
+  for (const tool of context.tools ?? []) {
+    if (!tool.name || tools.has(tool.name))
+      throw new Error(`Duplicate or empty tool name: ${tool.name}`);
+    tools.set(tool.name, tool);
+  }
+  for (const message of context.messages) {
+    if (message.role !== "system") {
+      messages.push(message);
+      continue;
+    }
+    let text;
+    if (typeof message.content === "string") text = message.content;
+    else if (
+      Array.isArray(message.content) &&
+      message.content.every(
+        (block) => block?.type === "text" && typeof block.text === "string",
+      )
+    )
+      text = message.content.map((block) => block.text).join("\n");
+    else throw new Error("Unsupported system message content: expected text");
+    if (text) parts.push(text);
+    for (const [name, value] of Object.entries(message.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else if (typeof value === "string") sections.set(name, value);
+      else throw new Error(`Invalid system prompt section: ${name}`);
+    }
+    for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+  }
+  return {
+    systemPrompt: [...parts, ...sections.values()].filter(Boolean).join("\n\n"),
+    messages,
+    tools: [...tools.values()],
+  };
+}
+
 function contentBlocks(content) {
   if (typeof content === "string")
     return content ? [{ type: "text", text: content }] : [];

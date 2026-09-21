@@ -52,9 +52,16 @@ This extension does not copy or refresh OAuth tokens in Pi's `auth.json`.
 - **History fidelity.** Native role/tool-result replay, images, errors, Unicode,
   partial-turn repair, same-provider thinking signatures and redacted reasoning.
   Foreign reasoning signatures are omitted, never repackaged as public text.
+- **Pi transcript compatibility.** Current Pi stores system instructions and tool
+  declarations in `messages`, not separate context fields. The transport replays
+  system text, named section updates/removals and tool additions/removals into
+  Claude's current system prompt and tool schemas before converting history.
+  Legacy `{ systemPrompt, messages, tools }` contexts remain supported.
 - **Pi request hook.** `before_provider_request` receives
-  `{ systemPrompt, messages, tools }`; valid replacements are honored. These are
-  sensitive fields and are not logged by the extension.
+  `{ systemPrompt, messages, tools }` after transcript projection; valid replacements
+  (including cleared instructions) are honored. System-role messages added by a
+  hook are folded into the system prompt, never dropped or sent as user text.
+  Unsupported system content fails explicitly. These sensitive fields are not logged.
 
 ## Implementation
 

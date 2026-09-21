@@ -186,6 +186,122 @@ test("payload hook edits reach the transport, including tool-result replay", asy
   }
 });
 
+test("normalized Pi transcript reaches CLI with current instructions, tools and paired results", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    const dest = join(dir, "capture");
+    const probe = {
+      name: "probe",
+      description: "CURRENT TOOL",
+      parameters: { type: "object" },
+    };
+    const input = {
+      messages: [
+        {
+          role: "system",
+          content: `fake:inspect\n${dest}`,
+          sections: { guidelines: "OLD", removed: "REMOVED" },
+          timestamp: 0,
+        },
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "x", name: "probe", arguments: {} },
+          ],
+        },
+        {
+          role: "system",
+          content: "LATE",
+          sections: { guidelines: "CURRENT", removed: null },
+          toolsAdded: [probe],
+          timestamp: 1,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "x",
+          toolName: "probe",
+          content: "REAL RESULT",
+        },
+      ],
+    };
+    const original = structuredClone(input);
+    const out = await runRequest(
+      model,
+      input,
+      {
+        onPayload(p) {
+          assert.equal(
+            p.systemPrompt,
+            `fake:inspect\n${dest}\n\nLATE\n\nCURRENT`,
+          );
+          assert.deepEqual(p.tools, [probe]);
+          assert.ok(p.messages.every((m) => m.role !== "system"));
+        },
+      },
+      config,
+    );
+    assert.equal(out.stopReason, "stop", out.errorMessage);
+    const capture = JSON.parse(await readFile(dest, "utf8"));
+    assert.match(capture.prompt, /LATE\n\nCURRENT/);
+    assert.match(capture.prompt, /probe: mcp__pi__/);
+    assert.doesNotMatch(capture.prompt, /OLD|REMOVED/);
+    assert.match(JSON.stringify(capture.history), /REAL RESULT/);
+    assert.doesNotMatch(JSON.stringify(capture.history), /interrupted/);
+    assert.deepEqual(input, original);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hook-injected system text is preserved for both mutation and replacement hooks", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    for (const replace of [false, true]) {
+      const dest = join(dir, `capture-${replace}`);
+      const out = await runRequest(
+        model,
+        context(`fake:inspect\n${dest}\nBASE`),
+        {
+          onPayload(p) {
+            const next = replace ? { ...p, messages: [...p.messages] } : p;
+            next.messages.push({
+              role: "system",
+              content: [{ type: "text", text: "HOOK SYSTEM" }],
+            });
+            return replace ? next : undefined;
+          },
+        },
+        config,
+      );
+      assert.equal(out.stopReason, "stop", out.errorMessage);
+      const capture = JSON.parse(await readFile(dest, "utf8"));
+      assert.equal(
+        capture.prompt,
+        `fake:inspect\n${dest}\nBASE\n\nHOOK SYSTEM`,
+      );
+      assert.deepEqual(capture.input.message, {
+        role: "user",
+        content: [{ type: "text", text: "hi" }],
+      });
+    }
+    const cleared = await runRequest(
+      model,
+      {
+        messages: [
+          { role: "system", content: "fake:error", timestamp: 0 },
+          { role: "user", content: "hi" },
+        ],
+      },
+      { onPayload: (p) => ({ ...p, systemPrompt: "" }) },
+      config,
+    );
+    assert.equal(cleared.stopReason, "stop", cleared.errorMessage);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("cancellation also bounds a stuck request hook", async () => {
   const out = await runRequest(
     model,

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
   convertMessages,
+  requestPayload,
   transcript,
   systemPrompt,
   toolDefinitions,
@@ -159,11 +160,7 @@ export async function runRequest(
       throw new Error(
         "Claude Code transport does not expose temperature/sampling parameters",
       );
-    let payload = {
-      systemPrompt: context.systemPrompt ?? "",
-      messages: context.messages,
-      tools: context.tools ?? [],
-    };
+    let payload = requestPayload(context);
     if (options.onPayload) {
       payload = await Promise.race([
         Promise.resolve(options.onPayload(payload, model)).then((p) =>
@@ -186,6 +183,10 @@ export async function runRequest(
       typeof payload.systemPrompt !== "string"
     )
       throw new Error("Invalid Claude payload from before_provider_request");
+    // Hooks can also add system-role messages. Preserve their instructions and
+    // tool deltas before converting the conversation, without restoring fields
+    // that a hook deliberately replaced or cleared.
+    payload = requestPayload(payload);
     if (options.toolChoice === "none") payload = { ...payload, tools: [] };
     const messages = convertMessages(payload.messages, model);
     // Claude's stdin is a user PROMPT, not an API tool-result endpoint. Pending
