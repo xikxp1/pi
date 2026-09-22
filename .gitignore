@@ -15,6 +15,7 @@ agent/agents/PiGoal*.md
 
 # Fetched provider catalog cache (etag/timestamps, regenerated on launch)
 agent/models-store.json
+agent/claude-native-cache/
 
 # Local runtime data, caches, and settings backups
 agent/fff/

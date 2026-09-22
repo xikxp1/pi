@@ -56,24 +56,34 @@ test("system prompt preserves all Pi text and schemas without reconstruction", (
   assert.throws(() => toolDefinitions([tool, tool]), /Duplicate/);
 });
 
-test("catalog is open-ended, includes Fable 5.1, and keeps thinking capabilities", () => {
-  const models = buildModels([
-    {
-      ...model,
-      name: "Fable 5.1",
-      reasoning: true,
-      input: ["text", "image"],
-      contextWindow: 1000000,
-      maxTokens: 128000,
-      thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
-    },
-    {
-      ...model,
-      id: "claude-future-9",
-      contextWindow: 1000000,
-      maxTokens: 128000,
-    },
-  ]);
+test("discovered models are open-ended and keep CLI thinking capabilities", () => {
+  const models = buildModels(
+    [
+      {
+        value: model.id,
+        supportsEffort: true,
+        supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+      },
+      { value: "claude-future-9" },
+    ],
+    [
+      {
+        ...model,
+        name: "Fable 5.1",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 1000000,
+        maxTokens: 128000,
+        thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+      },
+      {
+        ...model,
+        id: "claude-future-9",
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
+    ],
+  );
   assert.equal(models.length, 2);
   assert.equal(models[0].id, "claude-fable-5-1");
   assert.equal(models[0].contextWindow, 200000);
@@ -84,10 +94,11 @@ test("catalog is open-ended, includes Fable 5.1, and keeps thinking capabilities
 test("catalog pricing is copied and partial cost overrides preserve other rates", () => {
   const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
   const catalog = [{ ...model, cost }];
-  const [projected] = buildModels(catalog);
+  const discovered = [{ value: model.id }];
+  const [projected] = buildModels(discovered, catalog);
   assert.deepEqual(projected.cost, cost);
   assert.notEqual(projected.cost, cost);
-  const [overridden] = buildModels(catalog, {
+  const [overridden] = buildModels(discovered, catalog, {
     [model.id]: { cost: { output: 20, cacheRead: 0 } },
   });
   assert.deepEqual(overridden.cost, { ...cost, output: 20, cacheRead: 0 });

@@ -15,16 +15,19 @@ Keep your other package entries. Do not also load `pi-claude-bridge`.
 Restart Pi after migrating from the old bridge, then select:
 
 ```text
-/model claude-native/claude-fable-5-1
+/model claude-native/claude-opus-5-5[1m]
 ```
 
 CLI:
 
 ```sh
-pi --provider claude-native --model claude-fable-5-1
+pi --provider claude-native --model 'claude-opus-5-5[1m]'
 ```
 
-`/claude-native-status` shows configuration without exposing prompts or credentials.
+`/claude-native-status` shows discovery source, cache age, errors, unknown pricing,
+limits and configuration without exposing prompts or credentials.
+`/claude-native-refresh` rediscovers models and updates the selector without a
+restart. `/reload` also rediscovers models and rereads configuration.
 Authentication stays in Claude Code; use `claude auth status` / `claude auth login`.
 This extension does not copy or refresh OAuth tokens in Pi's `auth.json`.
 
@@ -33,9 +36,19 @@ This extension does not copy or refresh OAuth tokens in Pi's `auth.json`.
 - **Full Pi prompt** forwarded verbatim, followed only by a tool-name mapping.
   Includes `promptGuidelines`, `toolSnippets`, context files, skills and late
   `before_agent_start` modifications. No prompt reconstruction or capture cache.
-- **No model allowlist.** Projects all Claude models from Pi's catalog, including
-  Fable 5.1. Uses the runtime's persisted catalog on session start when available.
-  Pi updates provide new catalog entries; no separate bridge release is needed.
+- **Claude Code model discovery.** Runs a bounded, isolated CLI initialization
+  handshake without sending a user prompt. Only the CLI's reported models appear,
+  including new models absent from Pi's catalog. Equivalent aliases are deduplicated
+  into resolved IDs; explicit `[1m]` variants retain their 1M context. Older CLIs
+  without resolved IDs retain their aliases. Discovery completes before startup
+  selection and `pi --list-models`; no SDK dependency or inference request is needed.
+- **Offline fallback.** Successful discoveries are saved atomically with private
+  permissions in `~/.pi/agent/claude-native-cache/models.json`. Failure uses the last
+  successful list with a visible stale warning. With no valid cache there are no
+  automatic provider entries, never a fallback to Pi's catalog. Cache entries are
+  tied to the configured executable, but can be stale after account changes; refresh
+  after switching accounts. Only model metadata is cached, not account details.
+  An empty or malformed response is treated as a discovery failure.
 - **Only Pi tools.** A schema-only MCP server advertises Pi's exact JSON schemas.
   It has no executor. Tool calls are returned as ordinary Pi tool calls: Pi does
   validation, permission hooks, execution, questions, updates and result hooks.
@@ -65,7 +78,8 @@ This extension does not copy or refresh OAuth tokens in Pi's `auth.json`.
 
 ## Implementation
 
-`index.ts` registers the provider. `models.mjs` projects the catalog.
+`index.ts` registers the provider. `discovery.mjs` discovers and caches CLI models.
+`models.mjs` normalizes discoveries and enriches exact matches with catalog metadata.
 `protocol.mjs` converts history and streams. `transport.mjs` owns the CLI process.
 `mcp-schema-server.mjs` only serves schemas, never executes a tool.
 
@@ -97,32 +111,46 @@ Optional global `~/.pi/agent/claude-native.json` (reload after edits):
   "idleTimeoutMs": 120000,
   "requestTimeoutMs": 600000,
   "killGraceMs": 250,
+  "discoveryTimeoutMs": 10000,
   "modelIds": {},
   "modelOverrides": {}
 }
 ```
 
-Default advertised limits are deliberately conservative: **200K context / 32K
-output**. Anthropic API metadata does not establish Claude Max entitlements.
-There is no automatic `[1m]` selection. If a model/account supports a larger
-window, explicitly configure both the CLI model ID and Pi's corresponding limit:
+Discovered **`[1m]` variants advertise 1M context** and pass that suffix to the CLI,
+even when `resolvedModel` omits it (as with Fable). Other models remain capped at
+**200K context / 32K output**, or smaller exact catalog limits. Discovery does not
+supply numeric output limits, prices, or vision capabilities. Unknown models are
+text-only until an exact catalog entry or a verified `input` override supplies
+vision support. Effort choices come from the CLI, not the API catalog; a model
+without advertised effort controls has no selectable Pi thinking levels.
+
+Overrides remain available for verified metadata and limits. Base-ID overrides
+apply to discovered `[1m]` variants; exact variant keys take precedence. Inherited
+base `modelIds` mappings retain `[1m]`; an exact variant mapping is used verbatim.
+For example, explicitly cap a discovered model's output:
 
 ```json
 {
-  "modelIds": { "claude-fable-5-1": "claude-fable-5-1[1m]" },
   "modelOverrides": {
-    "claude-fable-5-1": { "contextWindow": 1000000, "maxTokens": 32000 }
+    "claude-fable-5-1[1m]": { "maxTokens": 32000 }
   }
 }
 ```
 
-This is an example, not a claim that every account/model accepts that suffix.
-Normal Pi `models.json` provider model definitions/overrides are also supported.
+Discovery reflects the CLI's reported choices, not a guarantee that every request
+will succeed or an exhaustive list of all accepted explicit IDs. Catalog-only
+older entries are no longer automatically listed. Select the current discovered
+ID when migrating saved selections, agent model pins, or scoped-model patterns.
+Normal Pi `models.json` provider model definitions/overrides are still supported
+as explicit user additions; `modelOverrides` alone does not enumerate new models.
 Pi thinking levels map to CLI effort; `xhigh` and `max` remain distinct.
 
 ### Deliberate limitations
 
-- POSIX only; tested on macOS with Pi 0.85.1 and Claude Code 2.1.266.
+- POSIX only; discovery tested on macOS with Pi 0.87.0 and Claude Code 2.1.280.
+  Each extension load (including a subagent) initializes the CLI, bounded by
+  `discoveryTimeoutMs`, plus process cleanup. No long-lived discovery process remains.
 - Starts a process for **every model response**, so tool-heavy work has additional
   latency and cache reuse may be lower than a persistent-process bridge.
 - Native transcript and stream-json details can change with Claude CLI releases.
@@ -135,9 +163,12 @@ Pi thinking levels map to CLI effort; `xhigh` and `max` remain distinct.
 - Claude controls actual thinking visibility and prompt-cache policy. Pi cache
   retention settings are not translated into undocumented CLI internals.
 - Token usage comes from the actual streamed response. Pi reports **estimated
-  API-equivalent costs** using Anthropic catalog prices, including cache reads
-  and writes. These are **not** Claude Max subscription charges or account
-  overages. `modelOverrides` can override `cost` rates (USD per million tokens).
+  API-equivalent costs** using exact-model Anthropic catalog prices, including
+  cache reads and writes. For a new model with no known prices, Pi requires numeric
+  rates: zero placeholders are used and `/claude-native-status` identifies them as
+  **unknown, not free usage**. No prices are borrowed from an older model. These
+  estimates are **not** Claude Max subscription charges or account overages.
+  `modelOverrides` can override `cost` rates (USD per million tokens).
   Previously recorded zero-cost messages are not recalculated.
 - No prompt/transcript debug logging. Request temp files are removed on normal
   completion/error/abort; an uncatchable host crash can leave private temp files.
@@ -152,13 +183,15 @@ Use an explicit provider-qualified model to avoid fuzzy routing to Pi's direct
 Anthropic provider (a stale OAuth credential can still look configured):
 
 ```text
-Agent({ subagent_type: "general-purpose", model: "claude-native/claude-fable-5-1", ... })
+Agent({ subagent_type: "general-purpose", model: "claude-native/claude-fable-5-1[1m]", ... })
 ```
 
-`~/.pi/agent/agents/Explore.md` preserves the installed Explore prompt/tools but
-pins `claude-native/claude-haiku-4-5`. Agent frontmatter is authoritative, so a
-caller-provided `model` cannot override that pin. Other agent types retain their
-existing model selection. Project-specific agent definitions can override this.
+Use discovered IDs for agent model pins (currently Haiku resolves to
+`claude-native/claude-haiku-4-5-20251001`). Existing `Explore.md` definitions may
+still pin the earlier undated alias; review them when migrating. Agent frontmatter
+is authoritative, so a caller-provided `model` cannot override that pin. Other
+agent types retain their existing model selection. Project-specific agent
+definitions can override this.
 
 ## Tests
 
@@ -167,6 +200,10 @@ cd ~/.pi/agent/packages/pi-claude-native
 npm test                 # Offline, fake-process and conversion regression tests
 npm run test:live        # Uses your Claude Max account and installed Pi/Claude
 ```
+
+The offline suite also checks initialization without prompts, bounded failures,
+process-group cleanup, private cache fallback, alias/context/effort mapping, and
+installed-Pi `--list-models` startup discovery. No inference is used by those tests.
 
 The live suite checks history, tool results, concurrent request isolation, real
 Fable 5.1 via Pi, snippets/guidelines/late hooks, Pi execution/result hooks and an

@@ -15,6 +15,8 @@ import {
   wireName,
 } from "./protocol.mjs";
 
+import { cliModelId } from "./models.mjs";
+
 const schemaServer = fileURLToPath(
   new URL("./mcp-schema-server.mjs", import.meta.url),
 );
@@ -76,7 +78,7 @@ export function commandArgs({
     "--system-prompt-snapshot",
     "off",
     "--model",
-    config.modelIds?.[model.id] ?? model.id,
+    cliModelId(model.id, config.modelIds),
     "--settings",
     JSON.stringify({
       disableAllHooks: true,
