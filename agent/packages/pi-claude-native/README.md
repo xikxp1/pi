@@ -118,6 +118,14 @@ inference: a resume at an unknown uuid must fail with "No message found".
 - Inconclusive check (timeout, unexpected output): the request fails with an
   explicit error. The check is not cached and runs again on the next request.
 
+The anchor must survive the CLI's transcript loading. Claude Code silently drops
+**thinking-only assistant records**, such as a turn stopped by `max_tokens` or
+aborted while still reasoning. If such a record were last, the CLI would refuse
+with "No message found with message.uuid of …". History conversion therefore
+omits reasoning-only assistant turns, which the model never saw anyway. As a
+safety net, if the CLI still rejects the anchor before any output has streamed,
+the request is retried once with a plain resume instead of failing the Pi turn.
+
 `npm run test:live` asserts support and that no synthetic messages reach the
 model. Run it after every CLI update.
 

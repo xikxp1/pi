@@ -218,6 +218,34 @@ test("cross-provider thinking signatures are dropped, native signatures retained
   );
 });
 
+test("thinking-only assistant turns are omitted so every transcript record survives CLI loading", () => {
+  const thinking = {
+    type: "thinking",
+    thinking: "t",
+    thinkingSignature: "signed",
+  };
+  const out = convertMessages(
+    [
+      user("a"),
+      // e.g. a turn stopped by max_tokens while still reasoning
+      { ...assistant([thinking]), stopReason: "length" },
+      user("b"),
+      assistant([thinking, { type: "text", text: "kept" }]),
+      user("c"),
+    ],
+    model,
+  );
+  assert.deepEqual(
+    out.map((m) => m.role),
+    ["user", "assistant", "user"],
+  );
+  assert.deepEqual(
+    out[0].content.map((b) => b.text),
+    ["a", "b"],
+  );
+  assert.equal(out[1].content.at(-1).text, "kept");
+});
+
 test("transcript parent chains are request-local and complete", () => {
   const messages = convertMessages(
     [user("a"), assistant([{ type: "text", text: "b" }]), user("c")],

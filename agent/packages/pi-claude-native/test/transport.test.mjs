@@ -455,6 +455,40 @@ test("CLI without --resume-session-at falls back to a plain resume", async () =>
   }
 });
 
+test("a resume anchor the CLI dropped falls back to one plain resume", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    await withFakeCli(dir, "unanchored", "unanchored", async (cli) => {
+      const dest = join(dir, "capture");
+      const events = [];
+      const out = await runRequest(
+        model,
+        toolResultContext(`fake:inspect\n${dest}`),
+        {},
+        cli,
+        (e) => events.push(e),
+      );
+      assert.equal(out.stopReason, "stop", out.errorMessage);
+      assert.equal(text(out), "héllo 😀\u2028world\u2029");
+      assert.equal(
+        events.filter((e) => ["done", "error"].includes(e.type)).length,
+        1,
+      );
+      const capture = JSON.parse(await readFile(dest, "utf8"));
+      assert.ok(capture.args.includes("--resume"));
+      assert.ok(!capture.args.includes("--resume-session-at"));
+      const log = await readFile(join(dir, "unanchored.probes"), "utf8");
+      assert.equal(log.match(/anchored-request/g)?.length, 1);
+    });
+    assert.deepEqual(
+      (await readdir(dir)).filter((name) => name.startsWith("pi-claude-")),
+      [],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("an inconclusive support check fails the request and is retried", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
   try {

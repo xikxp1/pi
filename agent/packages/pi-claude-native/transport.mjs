@@ -297,6 +297,19 @@ export async function runRequest(
       config.killGraceMs ?? 250,
     );
   };
+  const reapChild = async () => {
+    stop();
+    await new Promise((resolve) =>
+      setTimeout(resolve, (config.killGraceMs ?? 250) + 10),
+    );
+    killGroup("SIGKILL");
+    clearTimeout(killTimer);
+    await Promise.race([
+      closed,
+      new Promise((resolve) => setTimeout(resolve, 250)),
+    ]);
+    stopping = false;
+  };
   const abortable = (promise) =>
     Promise.race([
       promise,
@@ -403,137 +416,158 @@ export async function runRequest(
     ]);
     abort.signal.throwIfAborted();
     const decoder = new ResponseDecoder(output, payload.tools, emit, model);
-    const args = commandArgs({
-      model,
-      options,
-      config,
-      directory,
-      hasHistory,
-      hasTools: tools.length > 0,
-      resumeAt: trimResume ? history.at(-1)?.uuid : undefined,
-    });
     const env = childEnvironment({
       ...options,
       maxTokens: options.maxTokens ?? Math.min(model.maxTokens, 32000),
     });
-    child = spawn(config.executable ?? "claude", args, {
-      cwd: directory,
-      env,
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    closed = new Promise((resolve) => child.once("close", resolve));
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      let buffer = "";
-      let stderr = "";
-      const finish = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(idleTimer);
-        abort.signal.removeEventListener("abort", aborted);
-        stop();
-        if (error) reject(error);
-        else resolve();
-      };
-      const aborted = () => finish(abort.signal.reason);
-      const touch = () => {
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(
-          () =>
-            finish(
-              new Error("Claude produced no output before the idle timeout"),
-            ),
-          options.timeoutMs ?? config.idleTimeoutMs ?? 120000,
-        );
-      };
-      const record = (r) => {
-        if (r.parent_tool_use_id)
-          throw new Error("Unexpected Claude-owned subagent output");
-        if (r.type === "stream_event") {
-          decoder.event(r.event);
-          if (decoder.done) finish();
-        } else if (r.type === "assistant" && r.error) {
-          throw new Error(
-            r.message?.content
-              ?.filter((b) => b.type === "text")
-              .map((b) => b.text)
-              .join("\n") || r.error,
+    const attempt = (resumeAt) => {
+      const args = commandArgs({
+        model,
+        options,
+        config,
+        directory,
+        hasHistory,
+        hasTools: tools.length > 0,
+        resumeAt,
+      });
+      child = spawn(config.executable ?? "claude", args, {
+        cwd: directory,
+        env,
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      closed = new Promise((resolve) => child.once("close", resolve));
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let buffer = "";
+        let stderr = "";
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(idleTimer);
+          abort.signal.removeEventListener("abort", aborted);
+          stop();
+          if (error) reject(error);
+          else resolve();
+        };
+        const aborted = () => finish(abort.signal.reason);
+        const touch = () => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(
+            () =>
+              finish(
+                new Error("Claude produced no output before the idle timeout"),
+              ),
+            options.timeoutMs ?? config.idleTimeoutMs ?? 120000,
           );
-        } else if (r.type === "result") {
-          if (r.is_error || r.subtype !== "success")
-            throw new Error((r.errors ?? [r.result ?? r.subtype]).join("\n"));
-          // Deliberately do NOT accept result-text-only fallback: missing stream
-          // frames could otherwise silently lose tool calls or thinking blocks.
-          if (!decoder.done)
+        };
+        const record = (r) => {
+          if (r.parent_tool_use_id)
+            throw new Error("Unexpected Claude-owned subagent output");
+          if (r.type === "stream_event") {
+            decoder.event(r.event);
+            if (decoder.done) finish();
+          } else if (r.type === "assistant" && r.error) {
             throw new Error(
-              "Claude result arrived without a complete response stream",
+              r.message?.content
+                ?.filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join("\n") || r.error,
             );
-        } else if (r.type === "system" && r.subtype === "init") {
-          const advertised = new Set(
-            payload.tools.map((t) => wireName(t.name)),
-          );
-          if (r.tools?.some((name) => !advertised.has(name)))
-            throw new Error("Claude exposed tools outside the Pi allowlist");
-          if (
-            tools.length &&
-            !r.mcp_servers?.some(
-              (s) => s.name === "pi" && s.status === "connected",
+          } else if (r.type === "result") {
+            if (r.is_error || r.subtype !== "success")
+              throw new Error((r.errors ?? [r.result ?? r.subtype]).join("\n"));
+            // Deliberately do NOT accept result-text-only fallback: missing stream
+            // frames could otherwise silently lose tool calls or thinking blocks.
+            if (!decoder.done)
+              throw new Error(
+                "Claude result arrived without a complete response stream",
+              );
+          } else if (r.type === "system" && r.subtype === "init") {
+            const advertised = new Set(
+              payload.tools.map((t) => wireName(t.name)),
+            );
+            if (r.tools?.some((name) => !advertised.has(name)))
+              throw new Error("Claude exposed tools outside the Pi allowlist");
+            if (
+              tools.length &&
+              !r.mcp_servers?.some(
+                (s) => s.name === "pi" && s.status === "connected",
+              )
             )
-          )
-            throw new Error("Pi schema MCP server failed to connect");
-        } else if (r.type === "control_request")
-          throw new Error("Unexpected Claude control/permission request");
-      };
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => {
-        if (settled) return;
-        touch();
-        buffer += chunk;
-        try {
-          let end;
-          while (!settled && (end = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, end);
-            buffer = buffer.slice(end + 1);
-            if (line.length > MAX_LINE)
+              throw new Error("Pi schema MCP server failed to connect");
+          } else if (r.type === "control_request")
+            throw new Error("Unexpected Claude control/permission request");
+        };
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          if (settled) return;
+          touch();
+          buffer += chunk;
+          try {
+            let end;
+            while (!settled && (end = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, end);
+              buffer = buffer.slice(end + 1);
+              if (line.length > MAX_LINE)
+                throw new Error("Claude JSONL record exceeds size limit");
+              if (line.trim()) record(JSON.parse(line));
+            }
+            if (buffer.length > MAX_LINE)
               throw new Error("Claude JSONL record exceeds size limit");
-            if (line.trim()) record(JSON.parse(line));
+          } catch (error) {
+            finish(error);
           }
-          if (buffer.length > MAX_LINE)
-            throw new Error("Claude JSONL record exceeds size limit");
-        } catch (error) {
-          finish(error);
-        }
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr = (stderr + chunk).slice(-4096);
-      });
-      child.once("error", finish);
-      child.stdin.on("error", (error) => {
-        if (!settled) finish(error);
-      });
-      child.once("close", (code, signal) => {
-        if (!settled)
-          finish(
-            new Error(
-              `Claude exited before completing its response (code=${code}, signal=${signal}). ${stderr}`,
-            ),
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr = (stderr + chunk).slice(-4096);
+        });
+        child.once("error", finish);
+        child.stdin.on("error", (error) => {
+          if (!settled) finish(error);
+        });
+        child.once("close", (code, signal) => {
+          if (!settled)
+            finish(
+              new Error(
+                `Claude exited before completing its response (code=${code}, signal=${signal}). ${stderr}`,
+              ),
+            );
+        });
+        abort.signal.addEventListener("abort", aborted, { once: true });
+        touch();
+        if (abort.signal.aborted) aborted();
+        else
+          child.stdin.end(
+            JSON.stringify({
+              type: "user",
+              message: messages.at(-1),
+              parent_tool_use_id: null,
+              session_id: sessionId,
+            }) + "\n",
           );
       });
-      abort.signal.addEventListener("abort", aborted, { once: true });
-      touch();
-      if (abort.signal.aborted) aborted();
-      else
-        child.stdin.end(
-          JSON.stringify({
-            type: "user",
-            message: messages.at(-1),
-            parent_tool_use_id: null,
-            session_id: sessionId,
-          }) + "\n",
-        );
-    });
+    };
+    const resumeAt = trimResume ? history.at(-1)?.uuid : undefined;
+    try {
+      await attempt(resumeAt);
+    } catch (error) {
+      // The CLI silently drops some records while loading a transcript (for
+      // example thinking-only assistant turns). If our anchor was dropped, the
+      // CLI refuses before inference; retry once with a plain resume rather
+      // than failing the whole Pi turn. Never retry after output has streamed.
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !resumeAt ||
+        decoder.started ||
+        abort.signal.aborted ||
+        !message.includes(`No message found with message.uuid of: ${resumeAt}`)
+      )
+        throw error;
+      await reapChild();
+      await attempt(undefined);
+    }
     options.signal?.throwIfAborted();
   } catch (error) {
     output.stopReason = options.signal?.aborted ? "aborted" : "error";

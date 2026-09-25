@@ -216,6 +216,15 @@ export function convertMessages(messages, model) {
         } else if (b.type !== "text")
           throw new Error(`Unsupported assistant block: ${b.type}`);
       }
+      // Claude Code drops thinking-only assistant records when it loads a
+      // resumed transcript, so their uuids cannot anchor --resume-session-at.
+      // Omit them here so the transcript we write is the one the CLI keeps.
+      if (
+        blocks.every(
+          (b) => b.type === "thinking" || b.type === "redacted_thinking",
+        )
+      )
+        continue;
       append("assistant", blocks);
     } else throw new Error(`Unsupported message role: ${msg.role}`);
   }
