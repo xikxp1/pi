@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,6 +48,7 @@ export function childEnvironment(env, tools) {
     PI_SUBAGENT_CHILD: "1",
     PI_SUBAGENT_TOOLS: JSON.stringify(childTools(tools)),
     PI_ACP_SUBAGENTS: "0",
+    PI_ACP_SUBAGENT_SESSIONS: "0",
     PI_ACP_TERMINAL: "0",
     PI_OFFLINE: "1",
   };
@@ -65,7 +73,6 @@ export function childArguments({ model, thinking, tools, trusted, extension }) {
     "--mode",
     "json",
     "--print",
-    "--no-session",
     "--offline",
     trusted ? "--approve" : "--no-approve",
     "-e",
@@ -229,6 +236,9 @@ export class JsonLines {
  *   cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal, timeout?: number,
  *   onUpdate?: (snapshot: { version: number, agentId: string, runId: string,
  *     title: string, status: string, text: string, outputFile: string, toolUses: number }) => void,
+ *   onBridge?: (event: object) => void,
+ *   onRegister?: (descriptor: object) => void, parentToolCallId?: string, title?: string,
+ *   parentPiSessionId?: string, parentSessionFile?: string,
  *   killGraceMs?: number, outputDir?: string
  * }} options
  */
@@ -241,19 +251,64 @@ export async function runSubagent({
   signal,
   timeout,
   onUpdate,
+  onBridge,
+  onRegister,
+  parentToolCallId,
+  parentPiSessionId,
+  parentSessionFile,
+  title = "Subagent",
   killGraceMs = 1500,
   outputDir = tmpdir(),
 }) {
   if (signal?.aborted) throw new Error("Subagent cancelled before launch");
   const runId = randomUUID();
-  const outputFile = join(
-    mkdtempSync(join(outputDir, "pi-subagent-")),
-    "output.txt",
-  );
+  mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+  const directory = mkdtempSync(join(outputDir, "pi-subagent-"));
+  const outputFile = join(directory, "output.txt");
+  const sessionFile = join(directory, "session.jsonl");
+  const eventsFile = join(directory, "events.jsonl");
+  const stateFile = join(directory, "state.json");
+  const cancelFile = join(directory, `cancel-${randomUUID()}`);
+  const descriptor = {
+    version: 2,
+    runId,
+    parentToolCallId,
+    parentPiSessionId,
+    title,
+    sessionFile,
+    eventsFile,
+    outputFile,
+  };
   writeFileSync(outputFile, "", { mode: 0o600 });
-  const transcript = new Transcript((text) =>
-    appendFileSync(outputFile, text, "utf8"),
+  writeFileSync(
+    sessionFile,
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id: runId,
+      timestamp: new Date().toISOString(),
+      cwd,
+      piSubagent: true,
+      ...(parentSessionFile ? { parentSession: parentSessionFile } : {}),
+    }) + "\n",
+    { mode: 0o600 },
   );
+  writeFileSync(eventsFile, "", { mode: 0o600 });
+  let sequence = 0;
+  const bridge = (event) => {
+    try {
+      onBridge?.(event);
+    } catch {
+      /* Inspection detachment must not affect execution. */
+    }
+  };
+  const transcript = new Transcript((text) => {
+    try {
+      appendFileSync(outputFile, text, "utf8");
+    } catch (error) {
+      stop(`Subagent persistence: ${error.message}`);
+    }
+  });
   let status = "pending";
   let failure;
   let lastSnapshot;
@@ -261,12 +316,35 @@ export async function runSubagent({
     version: 1,
     agentId: runId,
     runId,
-    title: "Subagent",
+    title,
+    sessionFile,
+    eventsFile,
     status,
     text: transcript.visible(),
     outputFile,
   });
-  const publish = () => {
+  const saveState = () => {
+    const state = {
+      ...descriptor,
+      status,
+      ...(failure ? { error: failure } : {}),
+    };
+    writeFileSync(stateFile + ".tmp", JSON.stringify(state), { mode: 0o600 });
+    renameSync(stateFile + ".tmp", stateFile);
+  };
+  let publishedStatus;
+  const publish = (persist = true) => {
+    if (publishedStatus !== status) {
+      if (persist) saveState();
+      publishedStatus = status;
+      bridge({
+        version: 2,
+        type: "status",
+        runId,
+        status,
+        ...(failure ? { error: failure } : {}),
+      });
+    }
     const value = snapshot();
     const encoded = JSON.stringify(value);
     if (encoded === lastSnapshot) return;
@@ -277,7 +355,6 @@ export async function runSubagent({
       /* UI detachment must not affect execution. */
     }
   };
-  publish();
   let stderr = "";
   let child;
   let exitCode = null;
@@ -285,6 +362,8 @@ export async function runSubagent({
   let escalation;
   let deadline;
   let drainTimer;
+  let ticker;
+  let exited;
   let finished = false;
   const kill = (force) => {
     if (!child?.pid) return;
@@ -299,24 +378,67 @@ export async function runSubagent({
     }
   };
   const stop = (message) => {
-    if (finished || failure) return;
+    if (failure) return;
     failure = message;
-    kill(false);
-    escalation = setTimeout(() => kill(true), killGraceMs);
+    if (!finished && child?.pid) {
+      kill(false);
+      escalation = setTimeout(() => kill(true), killGraceMs);
+    }
   };
   const onAbort = () => stop("Subagent cancelled");
-  const ticker = setInterval(publish, 250);
-  ticker.unref();
+  bridge({ ...descriptor, type: "register", cancelFile });
   try {
-    child = spawn(invocation.command, [...(invocation.args ?? []), ...args], {
-      cwd,
-      env,
-      shell: false,
-      detached: process.platform !== "win32",
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
+    onRegister?.(descriptor);
+    publish();
+    ticker = setInterval(() => {
+      try {
+        if (existsSync(cancelFile)) stop("Subagent cancelled");
+        publish();
+      } catch (error) {
+        stop(`Subagent persistence: ${error.message}`);
+      }
+    }, 250);
+    ticker.unref();
+    child = spawn(
+      invocation.command,
+      [...(invocation.args ?? []), ...args, "--session", sessionFile],
+      {
+        cwd,
+        env,
+        shell: false,
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const decoder = new JsonLines((event) => {
+      transcript.event(event);
+      // agent_end repeats the entire history. Keep the linear event stream only.
+      if (
+        [
+          "message_start",
+          "message_update",
+          "message_end",
+          "tool_execution_start",
+          "tool_execution_update",
+          "tool_execution_end",
+        ].includes(event?.type)
+      ) {
+        const record = {
+          version: 2,
+          type: "event",
+          runId,
+          sequence: sequence++,
+          event,
+        };
+        try {
+          appendFileSync(eventsFile, JSON.stringify(record) + "\n", "utf8");
+        } finally {
+          // Even a full disk must not hide output already received from Pi.
+          bridge(record);
+        }
+      }
     });
-    const decoder = new JsonLines((event) => transcript.event(event));
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -333,7 +455,7 @@ export async function runSubagent({
     child.stdin.on("error", (error) => {
       if (error.code !== "EPIPE") stop(`Subagent stdin: ${error.message}`);
     });
-    const exited = new Promise((resolve) => {
+    exited = new Promise((resolve) => {
       child.once("error", (error) => {
         failure ??= `Cannot launch Pi subagent: ${error.message}`;
         resolve();
@@ -378,6 +500,7 @@ export async function runSubagent({
   } catch (error) {
     failure ??= error instanceof Error ? error.message : String(error);
     kill(true);
+    if (exited) await exited;
   } finally {
     finished = true;
     clearInterval(ticker);
@@ -390,22 +513,31 @@ export async function runSubagent({
     child?.stderr.destroy();
   }
   status = failure ? "failed" : "completed";
-  if (failure) {
+  try {
+    saveState();
+  } catch (error) {
+    const diagnostic = `Subagent persistence: ${error.message}`;
+    failure = failure ? `${failure}\n${diagnostic}` : diagnostic;
+    status = "failed";
     try {
-      // Preserve interrupted visible output as well as the failure diagnostic.
-      transcript.commit(
-        [transcript.streaming, transcript.toolProgress]
-          .filter(Boolean)
-          .join("\n\n"),
-      );
-      transcript.streaming = "";
-      transcript.toolProgress = "";
-      transcript.commit(failure);
-    } catch {
-      transcript.text = bounded(transcript.visible() + "\n" + failure);
+      saveState();
+    } catch (stateError) {
+      console.error(`Cannot save failed subagent state: ${stateError.message}`);
     }
   }
-  publish();
+  if (failure) {
+    // The in-memory transcript remains usable even when its file cannot grow.
+    transcript.commit(
+      [transcript.streaming, transcript.toolProgress]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
+    transcript.streaming = "";
+    transcript.toolProgress = "";
+    transcript.commit(failure);
+  }
+  // Terminal delivery must not depend on the filesystem being writable.
+  publish(false);
   return {
     ...snapshot(),
     result: transcript.result,

@@ -41,7 +41,7 @@ export default function fixture(pi: ExtensionAPI) {
           process.env.PI_SUBAGENT_TEST_LOG!,
           JSON.stringify({
             child,
-            tools: context.tools?.map((t) => t.name),
+            tools: pi.getActiveTools(),
             messages: context.messages,
             model: model.id,
             provider: model.provider,

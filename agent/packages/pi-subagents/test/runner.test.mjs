@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import fs, { writeFileSync, existsSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,7 +193,7 @@ test("task is passed literally over stdin, not as arguments", async (t) => {
     captured.input,
     "Delegated task:\n\n/quit\n$(not-a-shell) --model other",
   );
-  assert.deepEqual(captured.args, []);
+  assert.deepEqual(captured.args, ["--session", result.sessionFile]);
 });
 
 for (const [mode, message] of [
@@ -221,6 +224,144 @@ test("spawn failure finishes the ACP card", async (t) => {
   assert.match(result.error, /Cannot launch/);
   assert.equal(updates.at(-1).status, "failed");
 });
+
+for (const failedWrite of [
+  "pending",
+  "in_progress",
+  "completed",
+  "failed",
+  "output",
+  "journal",
+  "registration",
+  "rename",
+]) {
+  test(
+    `persistence failure at ${failedWrite} still terminates and publishes failure`,
+    { timeout: 5000 },
+    async (t) => {
+      const events = [];
+      const updates = [];
+      const processes = [];
+      const intervals = new Set();
+      const write = fs.writeFileSync;
+      const append = fs.appendFileSync;
+      const rename = fs.renameSync;
+      const spawn = childProcess.spawn;
+      const interval = globalThis.setInterval;
+      const clear = globalThis.clearInterval;
+      let writesFailed = false;
+      const fullDisk = () =>
+        Object.assign(new Error("ENOSPC: no space left on device"), {
+          code: "ENOSPC",
+        });
+      t.mock.method(fs, "writeFileSync", (path, content, ...args) => {
+        if (String(path).endsWith("state.json.tmp")) {
+          const state = JSON.parse(content);
+          if (state.status === failedWrite) writesFailed = true;
+          if (writesFailed) throw fullDisk();
+        }
+        return write(path, content, ...args);
+      });
+      t.mock.method(fs, "renameSync", (path, destination) => {
+        if (
+          failedWrite === "rename" &&
+          JSON.parse(fs.readFileSync(path, "utf8")).status === "completed"
+        ) {
+          writesFailed = true;
+          throw fullDisk();
+        }
+        return rename(path, destination);
+      });
+      t.mock.method(fs, "appendFileSync", (path, ...args) => {
+        if (
+          (failedWrite === "output" && String(path).endsWith("output.txt")) ||
+          (failedWrite === "journal" && String(path).endsWith("events.jsonl"))
+        ) {
+          writesFailed = true;
+          throw fullDisk();
+        }
+        return append(path, ...args);
+      });
+      t.mock.method(childProcess, "spawn", (...args) => {
+        const process = spawn(...args);
+        processes.push(process);
+        return process;
+      });
+      t.mock.method(globalThis, "setInterval", (...args) => {
+        const timer = interval(...args);
+        intervals.add(timer);
+        return timer;
+      });
+      t.mock.method(globalThis, "clearInterval", (timer) => {
+        intervals.delete(timer);
+        return clear(timer);
+      });
+      syncBuiltinESMExports();
+      t.after(() => {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      });
+      const result = await run(
+        t,
+        failedWrite === "failed" ? "malformed" : "success",
+        {
+          onBridge: (event) => events.push(event),
+          onUpdate: (update) => updates.push(update),
+          onRegister() {
+            if (failedWrite === "registration") {
+              writesFailed = true;
+              throw fullDisk();
+            }
+          },
+        },
+      );
+      assert.equal(writesFailed, true);
+      assert.equal(result.status, "failed");
+      assert.match(result.error, /ENOSPC/);
+      assert.match(result.text, /ENOSPC/);
+      assert.equal(events[0].type, "register");
+      assert.equal(events.at(-1).type, "status");
+      assert.equal(events.at(-1).status, "failed");
+      assert.match(events.at(-1).error, /ENOSPC/);
+      assert.equal(
+        events.filter(
+          (event) =>
+            event.type === "status" &&
+            ["completed", "failed"].includes(event.status),
+        ).length,
+        1,
+      );
+      assert.equal(updates.at(-1).status, "failed");
+      assert.equal(intervals.size, 0);
+      assert.equal(
+        processes.length,
+        ["pending", "registration"].includes(failedWrite) ? 0 : 1,
+      );
+      for (const child of processes) {
+        assert.ok(child.exitCode !== null || child.signalCode !== null);
+        assert.equal(child.stdin.destroyed, true);
+        assert.equal(child.stdout.destroyed, true);
+        assert.equal(child.stderr.destroyed, true);
+      }
+      if (["completed", "rename"].includes(failedWrite)) {
+        assert.match(result.result, /Done/);
+        assert.match(result.text, /Done/);
+        assert.match(await readFile(result.outputFile, "utf8"), /Done/);
+      }
+      if (failedWrite === "output") {
+        assert.match(result.text, /Live output/);
+        assert.ok(
+          events.some(
+            (event) =>
+              event.type === "event" && event.event.type === "message_end",
+          ),
+        );
+      }
+      if (failedWrite === "journal")
+        assert.ok(events.some((event) => event.type === "event"));
+    },
+  );
+}
 
 test("already-aborted requests do not spawn", async (t) => {
   await assert.rejects(
@@ -253,6 +394,70 @@ test("timeout terminates a hanging child", { timeout: 5000 }, async (t) => {
   assert.equal(result.status, "failed");
   assert.match(result.error, /timed out/);
 });
+
+test("persistent child history, ordered structured journal and private control are registered before output", async (t) => {
+  const events = [];
+  let descriptor;
+  const result = await run(t, "success", {
+    parentToolCallId: "original-call",
+    onRegister(value) {
+      descriptor = value;
+    },
+    onBridge(event) {
+      events.push(event);
+    },
+  });
+  assert.equal(events[0].type, "register");
+  assert.equal(events[0].parentToolCallId, "original-call");
+  assert.equal(events.at(-1).status, "completed");
+  assert.equal(descriptor.runId, result.runId);
+  const header = JSON.parse(
+    (await readFile(result.sessionFile, "utf8")).split("\n")[0],
+  );
+  assert.equal(header.type, "session");
+  assert.equal(header.id, result.runId);
+  assert.equal(header.piSubagent, true);
+  const journal = (await readFile(result.eventsFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.deepEqual(
+    journal,
+    events.filter((event) => event.type === "event"),
+  );
+  assert.deepEqual(
+    journal.map((event) => event.sequence),
+    journal.map((_, index) => index),
+  );
+  assert.ok(journal.some((event) => event.event.type === "tool_execution_end"));
+  assert.ok(!journal.some((event) => event.event.type === "agent_end"));
+  assert.ok(!JSON.stringify(descriptor).includes("cancel-"));
+  if (process.platform !== "win32")
+    assert.equal((await stat(result.sessionFile)).mode & 0o777, 0o600);
+});
+
+test(
+  "random cancellation capability stops only its owning child",
+  { timeout: 5000 },
+  async (t) => {
+    let control;
+    const [cancelled, completed] = await Promise.all([
+      run(t, "stubborn", {
+        onBridge(event) {
+          if (event.type === "register") control = event.cancelFile;
+        },
+        onUpdate(snapshot) {
+          if (snapshot.text.includes("READY") && !existsSync(control))
+            writeFileSync(control, "", { mode: 0o600, flag: "wx" });
+        },
+      }),
+      run(t, "success"),
+    ]);
+    assert.equal(cancelled.status, "failed");
+    assert.match(cancelled.error, /cancelled/);
+    assert.equal(completed.status, "completed");
+  },
+);
 
 test("independent runs have unique cards and output files; broken UI cannot fail a child", async (t) => {
   const [a, b] = await Promise.all([

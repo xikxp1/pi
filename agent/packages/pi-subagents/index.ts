@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  getAgentDir,
   getPackageDir,
   truncateTail,
   type ExtensionAPI,
@@ -124,7 +125,7 @@ export default function subagents(pi: ExtensionAPI) {
         ),
       ),
     }),
-    async execute(_id, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       if (closing) throw new Error("Subagent extension is shutting down");
       if (signal?.aborted) throw new Error("Subagent cancelled before launch");
       if (!params.task.trim())
@@ -165,6 +166,8 @@ export default function subagents(pi: ExtensionAPI) {
         ? AbortSignal.any([signal, controller.signal])
         : controller.signal;
       const started = Date.now();
+      const parentPiSessionId = ctx.sessionManager.getSessionId();
+      const parentSessionFile = ctx.sessionManager.getSessionFile();
       const done = runSubagent({
         invocation: piInvocation(),
         args: childArguments({
@@ -175,12 +178,30 @@ export default function subagents(pi: ExtensionAPI) {
           extension: fileURLToPath(import.meta.url),
         }),
         task: params.task,
+        parentToolCallId: toolCallId,
+        parentPiSessionId,
+        parentSessionFile,
+        title,
+        outputDir: join(getAgentDir(), "subagents"),
+        onRegister: (descriptor) =>
+          pi.appendEntry("pi-subagent-session", descriptor),
+        onBridge: (event) => {
+          if (
+            ctx.mode === "rpc" &&
+            process.env.PI_ACP_SUBAGENT_SESSIONS === "1"
+          )
+            ctx.ui.setStatus("pi-acp:subagent-session", JSON.stringify(event));
+        },
         cwd: ctx.cwd,
         env: childEnvironment(process.env, tools),
         signal: combinedSignal,
         timeout: params.timeout,
         onUpdate: (snapshot) => {
-          if (ctx.mode === "rpc" && process.env.PI_ACP_SUBAGENTS === "1") {
+          if (
+            ctx.mode === "rpc" &&
+            process.env.PI_ACP_SUBAGENTS === "1" &&
+            process.env.PI_ACP_SUBAGENT_SESSIONS !== "1"
+          ) {
             try {
               // Version 1 is the existing pi-acp SubagentCards contract. No
               // legacy pi-subagents manager/global registry is required.
@@ -227,6 +248,17 @@ export default function subagents(pi: ExtensionAPI) {
           details: {
             status: result.status,
             runId: result.runId,
+            subagentSession: {
+              version: 2,
+              runId: result.runId,
+              parentToolCallId: toolCallId,
+              parentPiSessionId,
+              title,
+              sessionFile: result.sessionFile,
+              eventsFile: result.eventsFile,
+              outputFile: result.outputFile,
+            },
+            sessionFile: result.sessionFile,
             outputFile: result.outputFile,
             toolUses: result.toolUses,
             durationMs: Date.now() - started,

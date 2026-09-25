@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { writeFileSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -20,7 +21,13 @@ const fsExtension = fileURLToPath(
   new URL("../../../extensions/pi-acp-fs.ts", import.meta.url),
 );
 
-async function integration(t, mode = "success", rpc = true, overrides = {}) {
+async function integration(
+  t,
+  mode = "success",
+  rpc = true,
+  overrides = {},
+  native = false,
+) {
   const dir = await realpath(
     await mkdtemp(join(tmpdir(), "pi-subagent-integration-")),
   );
@@ -70,6 +77,7 @@ async function integration(t, mode = "success", rpc = true, overrides = {}) {
     PI_SUBAGENT_TEST_MODE: mode,
     PI_SUBAGENT_TEST_OVERRIDES: JSON.stringify(overrides),
     PI_ACP_SUBAGENTS: "1",
+    PI_ACP_SUBAGENT_SESSIONS: native ? "1" : "0",
     PI_ACP_TERMINAL: "1",
     PI_ACP_FS_SOCKET: socketPath,
     PI_ACP_FS_CAPS: "read",
@@ -79,7 +87,8 @@ async function integration(t, mode = "success", rpc = true, overrides = {}) {
   const args = [
     "--mode",
     rpc ? "rpc" : "json",
-    "--no-session",
+    "--session",
+    join(dir, "parent.jsonl"),
     "--no-context-files",
     "--no-skills",
     "--no-approve",
@@ -118,8 +127,25 @@ async function integration(t, mode = "success", rpc = true, overrides = {}) {
         ),
       );
     }, 25000);
+    let childControl;
     const decoder = new JsonLines((event) => {
       events.push(event);
+      if (
+        native &&
+        event.type === "extension_ui_request" &&
+        event.statusKey === "pi-acp:subagent-session"
+      ) {
+        const update = JSON.parse(event.statusText);
+        if (update.type === "register") childControl = update.cancelFile;
+        if (
+          mode === "cancel" &&
+          childControl &&
+          update.event?.assistantMessageEvent?.delta === "READY_TO_CANCEL"
+        ) {
+          writeFileSync(childControl, "", { flag: "wx", mode: 0o600 });
+          childControl = undefined;
+        }
+      }
       if (
         mode === "cancel" &&
         event.type === "extension_ui_request" &&
@@ -428,6 +454,102 @@ test(
     );
     assert.equal(new Set(snapshots.map((s) => s.runId)).size, 4);
     assert.equal(snapshots.filter((s) => s.status === "completed").length, 4);
+  },
+);
+
+test(
+  "real Pi RPC: negotiated children persist real histories and parent links with exact structured events",
+  { timeout: 30000 },
+  async (t) => {
+    const { dir, events, snapshots, toolResult } = await integration(
+      t,
+      "success",
+      true,
+      {},
+      true,
+    );
+    assert.equal(toolResult.isError, false);
+    assert.deepEqual(snapshots, []);
+    const native = events
+      .filter(
+        (event) =>
+          event.type === "extension_ui_request" &&
+          event.statusKey === "pi-acp:subagent-session",
+      )
+      .map((event) => JSON.parse(event.statusText));
+    const registered = native[0];
+    assert.equal(registered.type, "register");
+    assert.equal(registered.parentToolCallId, "delegate-probe");
+    assert.equal(native.at(-1).status, "completed");
+    const history = (await readFile(registered.sessionFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(history[0].id, registered.runId);
+    assert.equal(history[0].piSubagent, true);
+    assert.ok(history.some((entry) => entry.message?.role === "user"));
+    assert.ok(history.some((entry) => entry.message?.role === "assistant"));
+    assert.ok(
+      history.some(
+        (entry) =>
+          entry.message?.role === "toolResult" &&
+          entry.message.toolCallId === "read-probe",
+      ),
+    );
+    assert.doesNotMatch(JSON.stringify(history), /PRIVATE_PARENT_CONTEXT/);
+    const journal = (await readFile(registered.eventsFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(
+      native.filter((event) => event.type === "event"),
+      journal,
+    );
+    const parent = (await readFile(join(dir, "parent.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.ok(
+      parent.some(
+        (entry) =>
+          entry.customType === "pi-subagent-session" &&
+          entry.data.runId === registered.runId,
+      ),
+    );
+    assert.equal(
+      toolResult.result.details.subagentSession.runId,
+      registered.runId,
+    );
+  },
+);
+
+test(
+  "real Pi RPC: child-only cancellation leaves the parent running to completion",
+  { timeout: 30000 },
+  async (t) => {
+    const { events, toolResult } = await integration(
+      t,
+      "cancel",
+      true,
+      {},
+      true,
+    );
+    assert.equal(toolResult.isError, true);
+    assert.match(toolResult.result.content[0].text, /cancelled/);
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "message_end" &&
+          event.message?.role === "assistant" &&
+          event.message.content.some(
+            (block) => block.text === "PARENT_FINISHED",
+          ),
+      ),
+    );
+    const native = events
+      .filter((event) => event.statusKey === "pi-acp:subagent-session")
+      .map((event) => JSON.parse(event.statusText));
+    assert.equal(native.at(-1).status, "failed");
   },
 );
 

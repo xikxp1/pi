@@ -12,6 +12,7 @@ agent/sessions/
 agent/goal.json
 agent/goals/
 agent/agents/PiGoal*.md
+agent/subagents
 
 # Fetched provider catalog cache (etag/timestamps, regenerated on launch)
 agent/models-store.json
@@ -22,6 +23,7 @@ agent/fff/
 agent/run-history.jsonl
 agent/backups/
 pi-acp/session-map.json
+pi-acp/children
 web-search-cache/
 
 # Vendored binaries
