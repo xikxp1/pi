@@ -1,8 +1,19 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 const args = process.argv.slice(2);
 const arg = name => args[args.indexOf(name) + 1];
+// FAKE_CLAUDE_RESUME_AT: supported (default) | unsupported (older CLI) | ambiguous.
+const resumeAt = process.env.FAKE_CLAUDE_RESUME_AT ?? 'supported';
+const fail = text => { writeSync(2, text + '\n'); process.exit(1); };
+if (resumeAt === 'unsupported' && args.includes('--resume-session-at'))
+  fail("error: unknown option '--resume-session-at'");
+if (!args.includes('--system-prompt-file')) {
+  // Capability probe: never reaches inference.
+  if (process.env.FAKE_CLAUDE_PROBE_LOG) appendFileSync(process.env.FAKE_CLAUDE_PROBE_LOG, 'probe\n');
+  if (resumeAt === 'ambiguous') fail('unexpected probe failure');
+  fail(`No message found with message.uuid of: ${arg('--resume-session-at')}`);
+}
 const prompt = readFileSync(arg('--system-prompt-file'), 'utf8');
 const send = r => process.stdout.write(JSON.stringify(r) + '\n');
 if (prompt.startsWith('fake:hang')) { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); }

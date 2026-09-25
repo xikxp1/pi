@@ -7,7 +7,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { runRequest } from "./transport.mjs";
+import { runRequest, resumeSessionAtState } from "./transport.mjs";
 import { buildModels, hasKnownPricing } from "./models.mjs";
 import { loadDiscoveredModels } from "./discovery.mjs";
 
@@ -88,6 +88,19 @@ export default async function (pi: ExtensionAPI) {
 
   let discovery = await loadDiscoveredModels({ config, cachePath });
   let models = buildModels(discovery.models, catalog, config.modelOverrides);
+  let lastContext: ExtensionContext | undefined;
+  let resumeWarned = false;
+  const resumeFallbackWarning =
+    "claude-native: Claude CLI lacks --resume-session-at; tool-result turns may include synthetic resume messages";
+  // The transport probes support lazily on the first resumed request.
+  const warnResumeFallback = () => {
+    if (resumeWarned || resumeSessionAtState(config) !== "unsupported") return;
+    resumeWarned = true;
+    if (lastContext?.hasUI) {
+      lastContext.ui.setStatus("claude-native-resume", resumeFallbackWarning);
+      lastContext.ui.notify(resumeFallbackWarning, "warning");
+    } else console.error(`[${resumeFallbackWarning}]`);
+  };
   const register = () =>
     pi.registerProvider("claude-native", {
       name: "Claude Max (Pi Native)",
@@ -99,7 +112,10 @@ export default async function (pi: ExtensionAPI) {
         const stream = createAssistantMessageEventStream();
         void runRequest(model, context, options, config, (event) =>
           stream.push(event),
-        ).finally(() => stream.end());
+        ).finally(() => {
+          stream.end();
+          warnResumeFallback();
+        });
         return stream;
       },
     });
@@ -131,6 +147,14 @@ export default async function (pi: ExtensionAPI) {
       ...(discovery.error ? [`Discovery error: ${discovery.error}`] : []),
       ...(discovery.cacheError ? [`Cache: ${discovery.cacheError}`] : []),
       `CLI: ${config.executable ?? "claude"}; authentication: Claude Code login`,
+      `Resume repair suppression (undocumented --resume-session-at): ${
+        {
+          supported: "supported",
+          unsupported:
+            "UNSUPPORTED by this CLI; synthetic resume messages may reach the model",
+          unchecked: "not checked yet (probed on the first resumed request)",
+        }[resumeSessionAtState(config)]
+      }`,
       `Discovery timeout: ${config.discoveryTimeoutMs ?? 10000}ms; cache: ${cachePath}`,
       "Context: advertised [1m] variants use 1M; otherwise at most 200K. Output: at most 32K unless overridden.",
       ...(unknownPrices.length
@@ -168,6 +192,7 @@ export default async function (pi: ExtensionAPI) {
     );
   }
   pi.on("session_start", (_event, ctx) => {
+    lastContext = ctx;
     // Preserve effective Anthropic metadata overrides, but never add its entries.
     enrichFromRegistry(ctx);
     models = buildModels(discovery.models, catalog, config.modelOverrides);

@@ -238,42 +238,44 @@ export function convertMessages(messages, model) {
   return out;
 }
 
-export function transcript(messages, sessionId, cwd, modelId) {
+export function transcriptRecords(messages, sessionId, cwd, modelId) {
   let parentUuid = null;
+  return messages.map((message, index) => {
+    const uuid = randomUUID();
+    const record = {
+      type: message.role,
+      uuid,
+      parentUuid,
+      sessionId,
+      cwd,
+      timestamp: new Date(index).toISOString(),
+      isSidechain: false,
+      userType: "external",
+      version: "2.1.266",
+      message:
+        message.role === "assistant"
+          ? {
+              ...message,
+              id: `msg_${uuid}`,
+              type: "message",
+              model: modelId,
+              stop_reason: message.content.some((b) => b.type === "tool_use")
+                ? "tool_use"
+                : "end_turn",
+              stop_sequence: null,
+              usage: { input_tokens: 0, output_tokens: 0 },
+            }
+          : message,
+    };
+    parentUuid = uuid;
+    return record;
+  });
+}
+
+export function transcript(messages, sessionId, cwd, modelId) {
   return (
-    messages
-      .map((message, index) => {
-        const uuid = randomUUID();
-        const record = {
-          type: message.role,
-          uuid,
-          parentUuid,
-          sessionId,
-          cwd,
-          timestamp: new Date(index).toISOString(),
-          isSidechain: false,
-          userType: "external",
-          version: "2.1.266",
-          message:
-            message.role === "assistant"
-              ? {
-                  ...message,
-                  id: `msg_${uuid}`,
-                  type: "message",
-                  model: modelId,
-                  stop_reason: message.content.some(
-                    (b) => b.type === "tool_use",
-                  )
-                    ? "tool_use"
-                    : "end_turn",
-                  stop_sequence: null,
-                  usage: { input_tokens: 0, output_tokens: 0 },
-                }
-              : message,
-        };
-        parentUuid = uuid;
-        return JSON.stringify(record);
-      })
+    transcriptRecords(messages, sessionId, cwd, modelId)
+      .map((record) => JSON.stringify(record))
       .join("\n") + "\n"
   );
 }

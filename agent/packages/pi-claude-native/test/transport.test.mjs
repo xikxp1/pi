@@ -1,10 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runRequest, childEnvironment, commandArgs } from "../transport.mjs";
+import {
+  runRequest,
+  childEnvironment,
+  commandArgs,
+  resumeSessionAtSupport,
+} from "../transport.mjs";
 const executable = fileURLToPath(new URL("./fake-claude.mjs", import.meta.url));
 await chmod(executable, 0o755);
 const model = {
@@ -330,6 +342,141 @@ test("concurrent calls and child processes are isolated and terminated", async (
     assert.equal(b.stopReason, "aborted");
     const pid = Number(await readFile(dest, "utf8"));
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const toolResultContext = (systemPrompt) => ({
+  systemPrompt,
+  tools: [{ name: "probe", description: "", parameters: { type: "object" } }],
+  messages: [
+    { role: "user", content: "hi" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "x", name: "probe", arguments: {} }],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "x",
+      toolName: "probe",
+      content: "ANSWER",
+    },
+  ],
+});
+
+// The support cache is keyed by executable, so each scenario needs its own path.
+async function withFakeCli(dir, name, mode, run) {
+  const path = join(dir, name);
+  await symlink(executable, path);
+  const before = process.env.FAKE_CLAUDE_RESUME_AT;
+  const log = process.env.FAKE_CLAUDE_PROBE_LOG;
+  process.env.FAKE_CLAUDE_RESUME_AT = mode;
+  process.env.FAKE_CLAUDE_PROBE_LOG = join(dir, `${name}.probes`);
+  try {
+    return await run({ ...config, executable: path, tempRoot: dir });
+  } finally {
+    if (before === undefined) delete process.env.FAKE_CLAUDE_RESUME_AT;
+    else process.env.FAKE_CLAUDE_RESUME_AT = before;
+    if (log === undefined) delete process.env.FAKE_CLAUDE_PROBE_LOG;
+    else process.env.FAKE_CLAUDE_PROBE_LOG = log;
+  }
+}
+const probes = async (dir, name) =>
+  (await readFile(join(dir, `${name}.probes`), "utf8").catch(() => ""))
+    .split("\n")
+    .filter(Boolean).length;
+
+test("resumed history is truncated at Pi's last record, hiding CLI resume repair", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    await withFakeCli(dir, "supported", "supported", async (cli) => {
+      for (const n of [1, 2]) {
+        const dest = join(dir, `capture-${n}`);
+        const out = await runRequest(
+          model,
+          toolResultContext(`fake:inspect\n${dest}`),
+          {},
+          cli,
+        );
+        assert.equal(out.stopReason, "stop", out.errorMessage);
+        const capture = JSON.parse(await readFile(dest, "utf8"));
+        const at = capture.args.indexOf("--resume-session-at");
+        assert.ok(at > capture.args.indexOf("--resume"));
+        assert.equal(capture.args[at + 1], capture.history.at(-1).uuid);
+        assert.equal(
+          capture.history.at(-1).message.content[0].type,
+          "tool_result",
+        );
+      }
+      // One probe per executable, shared by later requests.
+      assert.equal(await probes(dir, "supported"), 1);
+      // No history means no resume and no probe.
+      const dest = join(dir, "capture-fresh");
+      const fresh = await runRequest(
+        model,
+        context(`fake:inspect\n${dest}`),
+        {},
+        cli,
+      );
+      assert.equal(fresh.stopReason, "stop", fresh.errorMessage);
+      const capture = JSON.parse(await readFile(dest, "utf8"));
+      assert.ok(!capture.args.includes("--resume"));
+      assert.ok(!capture.args.includes("--resume-session-at"));
+    });
+    assert.deepEqual(
+      (await readdir(dir)).filter((name) => name.startsWith("pi-claude-")),
+      [],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI without --resume-session-at falls back to a plain resume", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    await withFakeCli(dir, "older", "unsupported", async (cli) => {
+      assert.equal(await resumeSessionAtSupport(cli), false);
+      const dest = join(dir, "capture");
+      const out = await runRequest(
+        model,
+        toolResultContext(`fake:inspect\n${dest}`),
+        {},
+        cli,
+      );
+      assert.equal(out.stopReason, "stop", out.errorMessage);
+      const capture = JSON.parse(await readFile(dest, "utf8"));
+      assert.ok(capture.args.includes("--resume"));
+      assert.ok(!capture.args.includes("--resume-session-at"));
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an inconclusive support check fails the request and is retried", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-native-test-"));
+  try {
+    await withFakeCli(dir, "broken", "ambiguous", async (cli) => {
+      for (const n of [1, 2]) {
+        const events = [];
+        const out = await runRequest(
+          model,
+          toolResultContext("fake:ok"),
+          {},
+          cli,
+          (e) => events.push(e),
+        );
+        assert.equal(out.stopReason, "error");
+        assert.match(
+          out.errorMessage,
+          /Unable to verify .*--resume-session-at/,
+        );
+        assert.equal(events.at(-1).type, "error");
+        assert.equal(await probes(dir, "broken"), n);
+      }
+    });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

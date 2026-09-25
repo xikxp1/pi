@@ -8,6 +8,7 @@ import {
   convertMessages,
   requestPayload,
   transcript,
+  transcriptRecords,
   systemPrompt,
   toolDefinitions,
   ResponseDecoder,
@@ -21,6 +22,7 @@ const schemaServer = fileURLToPath(
   new URL("./mcp-schema-server.mjs", import.meta.url),
 );
 const MAX_LINE = 32 * 1024 * 1024;
+const PROBE_OUTPUT_LIMIT = 64 * 1024;
 
 export function childEnvironment(options = {}) {
   const env = { ...process.env };
@@ -53,6 +55,7 @@ export function commandArgs({
   directory,
   hasHistory,
   hasTools,
+  resumeAt,
 }) {
   const args = [
     "-p",
@@ -86,7 +89,10 @@ export function commandArgs({
       claudeMdExcludes: ["**/CLAUDE.md", "**/.claude/rules/**"],
     }),
   ];
-  if (hasHistory) args.push("--resume", join(directory, "history.jsonl"));
+  if (hasHistory) {
+    args.push("--resume", join(directory, "history.jsonl"));
+    if (resumeAt) args.push("--resume-session-at", resumeAt);
+  }
   if (hasTools) args.push("--mcp-config", join(directory, "mcp.json"));
   if (options.reasoning && options.reasoning !== "off") {
     const effort =
@@ -98,6 +104,149 @@ export function commandArgs({
     args.push("--effort", effort, "--thinking-display", "summarized");
   }
   return args;
+}
+
+function killProcessGroup(child, signal) {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch (e) {
+    if (e.code !== "ESRCH") {
+      try {
+        child.kill(signal);
+      } catch {}
+    }
+  }
+}
+
+// `--resume-session-at` is undocumented (absent from `claude --help`). Probe it
+// without inference: a supported CLI rejects an unknown message uuid, an older
+// one rejects the option itself. Any other outcome is not a definite answer.
+async function probeResumeSessionAt(config) {
+  const directory = await mkdtemp(
+    join(config.tempRoot ?? tmpdir(), "pi-claude-probe-"),
+  );
+  const missing = randomUUID();
+  const grace = config.killGraceMs ?? 250;
+  let child;
+  let closed;
+  let timer;
+  try {
+    const history = join(directory, "history.jsonl");
+    await writeFile(
+      history,
+      transcript(
+        [{ role: "user", content: [{ type: "text", text: "probe" }] }],
+        randomUUID(),
+        directory,
+        "probe",
+      ),
+      { mode: 0o600 },
+    );
+    child = spawn(
+      config.executable ?? "claude",
+      [
+        "-p",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--setting-sources",
+        "",
+        "--disable-slash-commands",
+        "--permission-mode",
+        "dontAsk",
+        "--settings",
+        JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }),
+        "--resume",
+        history,
+        "--resume-session-at",
+        missing,
+      ],
+      {
+        cwd: directory,
+        env: childEnvironment(),
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    closed = new Promise((resolve) => child.once("close", resolve));
+    const result = await new Promise((resolve, reject) => {
+      let output = "";
+      const collect = (chunk) => {
+        output = (output + chunk).slice(-PROBE_OUTPUT_LIMIT);
+      };
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", collect);
+      child.stderr.on("data", collect);
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ output, code, signal }));
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              "Timed out checking Claude CLI support for --resume-session-at",
+            ),
+          ),
+        config.discoveryTimeoutMs ?? 10000,
+      );
+    });
+    if (
+      result.output.includes(
+        `No message found with message.uuid of: ${missing}`,
+      )
+    )
+      return true;
+    if (/unknown option ['"]?--resume-session-at\b/.test(result.output))
+      return false;
+    throw new Error(
+      `Unable to verify Claude CLI support for --resume-session-at (code=${result.code}, signal=${result.signal}): ${result.output.trim().slice(-500)}`,
+    );
+  } finally {
+    clearTimeout(timer);
+    killProcessGroup(child, "SIGTERM");
+    if (child?.pid) {
+      await new Promise((resolve) => setTimeout(resolve, grace));
+      killProcessGroup(child, "SIGKILL");
+      await Promise.race([
+        closed,
+        new Promise((resolve) => setTimeout(resolve, 250)),
+      ]);
+    }
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const resumeSessionAtSupportByExecutable = new Map();
+const resumeSessionAtResults = new Map();
+
+/** Last definite probe result, without starting a probe. */
+export function resumeSessionAtState(config = {}) {
+  const supported = resumeSessionAtResults.get(config.executable ?? "claude");
+  if (supported === undefined) return "unchecked";
+  return supported ? "supported" : "unsupported";
+}
+
+/** Resolves true/false for a definite answer (cached per executable). A failed or
+ * ambiguous probe rejects and is not cached, so the next request checks again. */
+export function resumeSessionAtSupport(config = {}) {
+  const executable = config.executable ?? "claude";
+  let pending = resumeSessionAtSupportByExecutable.get(executable);
+  if (!pending) {
+    pending = probeResumeSessionAt(config).then((supported) => {
+      resumeSessionAtResults.set(executable, supported);
+      return supported;
+    });
+    resumeSessionAtSupportByExecutable.set(executable, pending);
+    pending.catch(() => {
+      if (resumeSessionAtSupportByExecutable.get(executable) === pending)
+        resumeSessionAtSupportByExecutable.delete(executable);
+    });
+  }
+  return pending;
 }
 
 /** One OS process group per model call. No singleton queries, result routing,
@@ -148,6 +297,17 @@ export async function runRequest(
       config.killGraceMs ?? 250,
     );
   };
+  const abortable = (promise) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        abort.signal.addEventListener(
+          "abort",
+          () => reject(abort.signal.reason),
+          { once: true },
+        ),
+      ),
+    ]);
   try {
     abort.signal.throwIfAborted();
     if (process.platform === "win32")
@@ -164,18 +324,11 @@ export async function runRequest(
       );
     let payload = requestPayload(context);
     if (options.onPayload) {
-      payload = await Promise.race([
+      payload = await abortable(
         Promise.resolve(options.onPayload(payload, model)).then((p) =>
           p === undefined ? payload : p,
         ),
-        new Promise((_, reject) =>
-          abort.signal.addEventListener(
-            "abort",
-            () => reject(abort.signal.reason),
-            { once: true },
-          ),
-        ),
-      ]);
+      );
     }
     abort.signal.throwIfAborted();
     if (
@@ -207,10 +360,25 @@ export async function runRequest(
       });
     }
     const tools = toolDefinitions(payload.tools);
+    const hasHistory = messages.length > 1;
+    // On --resume, the CLI classifies history ending in a tool_result as an
+    // interrupted turn and appends a synthetic "Continue from where you left
+    // off." user message plus a "No response requested." assistant reply. Print
+    // mode applies --resume-session-at AFTER that repair, so truncating at our
+    // own last record removes both. Older CLIs fall back to the plain resume.
+    const trimResume = hasHistory
+      ? await abortable(resumeSessionAtSupport(config))
+      : false;
     directory = await mkdtemp(
       join(config.tempRoot ?? tmpdir(), "pi-claude-native-"),
     );
     const sessionId = randomUUID();
+    const history = transcriptRecords(
+      messages.slice(0, -1),
+      sessionId,
+      directory,
+      model.id,
+    );
     const write = (name, text) =>
       writeFile(join(directory, name), text, { mode: 0o600 });
     await Promise.all([
@@ -218,7 +386,7 @@ export async function runRequest(
       write("tools.json", JSON.stringify(tools)),
       write(
         "history.jsonl",
-        transcript(messages.slice(0, -1), sessionId, directory, model.id),
+        history.map((record) => JSON.stringify(record)).join("\n") + "\n",
       ),
       write(
         "mcp.json",
@@ -240,8 +408,9 @@ export async function runRequest(
       options,
       config,
       directory,
-      hasHistory: messages.length > 1,
+      hasHistory,
       hasTools: tools.length > 0,
+      resumeAt: trimResume ? history.at(-1)?.uuid : undefined,
     });
     const env = childEnvironment({
       ...options,

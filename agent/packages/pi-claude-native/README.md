@@ -101,6 +101,26 @@ Tool-result continuations therefore add a short explicit continuation prompt.
 The CLI is launched with `--system-prompt-snapshot off` so resumed history cannot
 restore obsolete system instructions.
 
+**CLI trap: resume repair.** On `--resume`, Claude Code treats history ending in
+a `tool_result` as an _interrupted turn_. It appends a synthetic user
+"Continue from where you left off." and a synthetic assistant reply
+"No response requested." before the stdin prompt. The model then believes it
+answered that way itself and wastes a turn correcting it (seen after every
+`ask_user` call). The transport passes `--resume-session-at <uuid of Pi's last
+history record>`. Print mode applies that truncation _after_ the repair, so
+both synthetic messages are dropped. `--resume-session-at` is **undocumented**
+(absent from `claude --help`). Support is checked once per executable without
+inference: a resume at an unknown uuid must fail with "No message found".
+
+- Supported: the flag is passed on every resumed request.
+- `unknown option`: plain resume fallback, plus a visible warning and a
+  `/claude-native-status` entry. The synthetic messages can reappear.
+- Inconclusive check (timeout, unexpected output): the request fails with an
+  explicit error. The check is not cached and runs again on the next request.
+
+`npm run test:live` asserts support and that no synthetic messages reach the
+model. Run it after every CLI update.
+
 ## Configuration and limits
 
 Optional global `~/.pi/agent/claude-native.json` (reload after edits):
@@ -154,7 +174,8 @@ Pi thinking levels map to CLI effort; `xhigh` and `max` remain distinct.
 - Starts a process for **every model response**, so tool-heavy work has additional
   latency and cache reuse may be lower than a persistent-process bridge.
 - Native transcript and stream-json details can change with Claude CLI releases.
-  Run live tests after CLI updates. The adapter fails closed on unknown response
+  Run live tests after CLI updates. The resume-repair suppression depends on the
+  undocumented `--resume-session-at` flag (see _CLI trap: resume repair_). The adapter fails closed on unknown response
   shapes rather than executing unadvertised tools or silently dropping blocks.
 - The CLI does not expose Pi's HTTP header/response hooks; no fake HTTP callbacks.
   Temperature/sampling overrides and deferred requests return explicit errors.

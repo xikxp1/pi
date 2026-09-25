@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runRequest } from "../transport.mjs";
+import { runRequest, resumeSessionAtSupport } from "../transport.mjs";
 
 const live = process.env.PI_CLAUDE_LIVE === "1";
 const model = {
@@ -26,6 +26,56 @@ const tool = {
   },
 };
 const check = (m) => assert.notEqual(m.stopReason, "error", m.errorMessage);
+
+test(
+  "live: tool-result turns carry no synthetic CLI resume messages",
+  { skip: !live, timeout: 180000 },
+  async () => {
+    // Undocumented flag: fail loudly when a CLI update removes or changes it.
+    assert.equal(await resumeSessionAtSupport(), true);
+    const history = [
+      user("Get the secret now."),
+      {
+        role: "assistant",
+        provider: "claude-native",
+        model: model.id,
+        content: [
+          {
+            type: "toolCall",
+            id: "toolu_01ResumeRegression00000",
+            name: "probe",
+            arguments: { key: "violet-7319" },
+          },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "toolu_01ResumeRegression00000",
+        toolName: "probe",
+        content: [{ type: "text", text: "secret=marigold-8426" }],
+        isError: false,
+        timestamp: Date.now(),
+      },
+    ];
+    const reply = await runRequest(
+      model,
+      {
+        // Never name the synthetic phrases here: the model must only be able to
+        // produce them by quoting the transcript it actually received.
+        systemPrompt:
+          "Do not call tools. Quote verbatim every plain-text message (not tool calls or tool results) that appears earlier in this conversation, one per line, each prefixed with QUOTE:. Include text written by the user and by you. Then write END on its own line.",
+        tools: [tool],
+        messages: history,
+      },
+      { reasoning: "off" },
+    );
+    check(reply);
+    assert.match(text(reply), /QUOTE:.*Get the secret now/);
+    assert.match(text(reply), /END/);
+    assert.doesNotMatch(text(reply), /No response requested/i);
+    assert.doesNotMatch(text(reply), /left off/i);
+  },
+);
 
 test(
   "live: complete Pi prompt, native history, tool result replay and concurrency",
