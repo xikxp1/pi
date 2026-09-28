@@ -418,7 +418,7 @@ export async function runRequest(
     const decoder = new ResponseDecoder(output, payload.tools, emit, model);
     const env = childEnvironment({
       ...options,
-      maxTokens: options.maxTokens ?? Math.min(model.maxTokens, 32000),
+      maxTokens: options.maxTokens ?? model.maxTokens,
     });
     const attempt = (resumeAt) => {
       const args = commandArgs({

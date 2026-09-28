@@ -1,0 +1,1 @@
+{ "modelOverrides": { "claude-opus-5-5[1m]": { "maxTokens": 64000 } } }
