@@ -21,6 +21,7 @@ interface Run {
   title: string
   baseline: WeakSet<object>
   startedAt: number
+  started: boolean
   last?: string
   text: string
 }
@@ -118,10 +119,12 @@ export class SubagentsBridge {
         ),
         baseline: new WeakSet(baseline),
         startedAt,
+        started: status(record.status) === 'in_progress',
         text: ''
       }
       this.runs.set(value.id, run)
     }
+    if (event === 'started') run.started = true
     this.flush(
       run,
       record,
@@ -144,7 +147,8 @@ export class SubagentsBridge {
   }
 
   private flush(run: Run, record: Data, forced?: Status, event?: Data): void {
-    const currentStatus = forced ?? status(record.status)
+    // Terminal record status can precede awaited worktree cleanup and its final result.
+    const currentStatus = forced ?? (run.started ? 'in_progress' : status(record.status))
     if (!currentStatus) return
     if (typeof record.startedAt === 'number') run.startedAt = Math.max(run.startedAt, record.startedAt)
     const session = data(record.session)
