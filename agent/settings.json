@@ -2,8 +2,8 @@
   "lastChangelogVersion": "0.87.0",
   "theme": "monokai",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-6-astra",
-  "defaultThinkingLevel": "medium",
+  "defaultModel": "claude-opus-5-5[1m]",
+  "defaultThinkingLevel": "high",
   "packages": [
     "npm:@ff-labs/pi-fff",
     "npm:pi-ask-user",
