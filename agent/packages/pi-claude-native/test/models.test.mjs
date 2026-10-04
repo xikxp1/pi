@@ -57,6 +57,53 @@ test("only discoveries enumerate models; default/opus deduplicate in either orde
   );
 });
 
+test("configured extra models are appended, deduplicated, and inherit base CLI effort", () => {
+  const catalog = [
+    {
+      id: "claude-opus-5-5",
+      name: "Claude Opus 5.5",
+      cost,
+      contextWindow: 1000000,
+    },
+  ];
+  const discovered = [
+    record("opus", "claude-opus-5-5", {
+      supportsEffort: true,
+      supportedEffortLevels: ["low", "max"],
+    }),
+    record("claude-fable-5-1[1m]", "claude-fable-5-1"),
+  ];
+  const models = buildModels(
+    discovered,
+    catalog,
+    { "claude-opus-5-5[1m]": { maxTokens: 64000 } },
+    ["claude-opus-5-5[1m]", "claude-fable-5-1[1m]", "standalone"],
+  );
+  assert.deepEqual(
+    models.map((model) => model.id),
+    [
+      "claude-opus-5-5",
+      "claude-fable-5-1[1m]",
+      "claude-opus-5-5[1m]",
+      "standalone",
+    ],
+  );
+  const extra = models[2];
+  assert.equal(extra.name, "Claude Opus 5.5");
+  assert.equal(extra.contextWindow, 1000000);
+  assert.equal(extra.maxTokens, 64000);
+  assert.equal(extra.reasoning, true);
+  assert.equal(extra.thinkingLevelMap.max, "max");
+  assert.equal(extra.thinkingLevelMap.high, null);
+  assert.deepEqual(extra.cost, cost);
+  assert.equal(models[3].reasoning, false);
+  assert.equal(models[3].contextWindow, 200000);
+  assert.deepEqual(
+    buildModels([], [], {}, ["only[1m]"]).map((m) => m.id),
+    ["only[1m]"],
+  );
+});
+
 test("unknown models do not borrow family pricing, vision, effort, or limits", () => {
   const catalog = [
     {

@@ -141,7 +141,8 @@ Optional global `~/.pi/agent/claude-native.json` (reload after edits):
   "killGraceMs": 250,
   "discoveryTimeoutMs": 10000,
   "modelIds": {},
-  "modelOverrides": {}
+  "modelOverrides": {},
+  "extraModels": []
 }
 ```
 
@@ -172,6 +173,20 @@ older entries are no longer automatically listed. Select the current discovered
 ID when migrating saved selections, agent model pins, or scoped-model patterns.
 Normal Pi `models.json` provider model definitions/overrides are still supported
 as explicit user additions; `modelOverrides` alone does not enumerate new models.
+
+`extraModels` lists IDs to add to the discovered models, e.g. when the CLI
+stops reporting a `[1m]` variant it still accepts. They survive rediscovery and
+duplicates of discovered IDs are ignored. A `[1m]` extra gets 1M context, and an
+extra inherits effort levels from its discovered base model (`claude-opus-5-5`
+for `claude-opus-5-5[1m]`). Catalog metadata and `modelOverrides` apply as usual:
+
+```json
+{
+  "extraModels": ["claude-opus-5-5[1m]"],
+  "modelOverrides": { "claude-opus-5-5[1m]": { "maxTokens": 64000 } }
+}
+```
+
 Pi thinking levels map to CLI effort; `xhigh` and `max` remain distinct.
 
 ### Deliberate limitations

@@ -31,6 +31,7 @@ export default async function (pi: ExtensionAPI) {
     "discoveryTimeoutMs",
     "modelIds",
     "modelOverrides",
+    "extraModels",
   ]);
   for (const key of Object.keys(config))
     if (!allowed.has(key))
@@ -68,6 +69,18 @@ export default async function (pi: ExtensionAPI) {
     Object.values(config.modelIds).some((v) => typeof v !== "string" || !v)
   )
     throw new Error("modelIds values must be nonempty strings");
+  if (
+    config.extraModels !== undefined &&
+    (!Array.isArray(config.extraModels) ||
+      config.extraModels.some(
+        (v: unknown) =>
+          typeof v !== "string" || !v || /[\s\p{Cc}\p{Cf}]/u.test(v),
+      ))
+  )
+    throw new Error("extraModels must be an array of model ID strings");
+  const extraModels: string[] = config.extraModels ?? [];
+  const build = () =>
+    buildModels(discovery.models, catalog, config.modelOverrides, extraModels);
 
   // Read the persisted catalog for enrichment even in --list-models, where no
   // session_start event runs. Never enumerate models from this file.
@@ -87,7 +100,7 @@ export default async function (pi: ExtensionAPI) {
   }
 
   let discovery = await loadDiscoveredModels({ config, cachePath });
-  let models = buildModels(discovery.models, catalog, config.modelOverrides);
+  let models = build();
   let lastContext: ExtensionContext | undefined;
   let resumeWarned = false;
   const resumeFallbackWarning =
@@ -142,7 +155,7 @@ export default async function (pi: ExtensionAPI) {
         )
       : undefined;
     return [
-      `Provider: claude-native (${models.length} discovered models)`,
+      `Provider: claude-native (${models.length} models${extraModels.length ? `; configured extras: ${extraModels.join(", ")}` : ""})`,
       `Discovery: ${discovery.source === "cache" ? "STALE cache" : discovery.source}${age === undefined ? "" : `; last success ${age}s ago (${discovery.checkedAt})`}`,
       ...(discovery.error ? [`Discovery error: ${discovery.error}`] : []),
       ...(discovery.cacheError ? [`Cache: ${discovery.cacheError}`] : []),
@@ -195,7 +208,7 @@ export default async function (pi: ExtensionAPI) {
     lastContext = ctx;
     // Preserve effective Anthropic metadata overrides, but never add its entries.
     enrichFromRegistry(ctx);
-    models = buildModels(discovery.models, catalog, config.modelOverrides);
+    models = build();
     register();
     report(ctx);
   });
@@ -234,7 +247,7 @@ export default async function (pi: ExtensionAPI) {
               }
             : next;
         enrichFromRegistry(ctx);
-        models = buildModels(discovery.models, catalog, config.modelOverrides);
+        models = build();
         register();
         if (ctx.model?.provider === "claude-native") {
           const updated = ctx.modelRegistry.find("claude-native", ctx.model.id);

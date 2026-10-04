@@ -37,14 +37,36 @@ export function cliModelId(id, modelIds = {}) {
     : inherited;
 }
 
-/** Enumerate only CLI discoveries. The API catalog supplies metadata, never entries. */
-export function buildModels(discovered, catalog = [], overrides = {}) {
+/**
+ * Enumerate CLI discoveries plus explicitly configured extra IDs. The API
+ * catalog supplies metadata, never entries.
+ */
+export function buildModels(
+  discovered,
+  catalog = [],
+  overrides = {},
+  extraModels = [],
+) {
   const unique = new Map();
   for (const model of discovered) {
     const id = discoveredModelId(model);
     // Prefer a descriptive alias over the generic "Default (recommended)" entry.
     if (!unique.has(id) || unique.get(id).value === "default")
       unique.set(id, model);
+  }
+  for (const id of extraModels) {
+    if (unique.has(id)) continue;
+    // Extra variants inherit CLI capabilities (effort levels) from a discovered base.
+    const base = unique.get(baseId(id));
+    unique.set(id, {
+      ...(base && {
+        supportsEffort: base.supportsEffort,
+        supportedEffortLevels: base.supportedEffortLevels,
+        supportsAdaptiveThinking: base.supportsAdaptiveThinking,
+      }),
+      value: id,
+      resolvedModel: id,
+    });
   }
   return [...unique].map(([id, model]) => {
     const { source, override, cost } = metadata(id, catalog, overrides);
