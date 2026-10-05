@@ -9,6 +9,7 @@ agent/auth.json
 agent/sessions/
 
 # Goal profiles, private artifacts, and generated bundled-agent copies
+agent/btw-watch.json
 agent/goal.json
 agent/goals/
 agent/agents/PiGoal*.md
